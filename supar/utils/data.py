@@ -5,6 +5,7 @@ from collections import namedtuple
 import torch
 import torch.distributed as dist
 from supar.utils.alg import kmeans
+import pdb
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -88,6 +89,7 @@ class Dataset(torch.utils.data.Dataset):
     def build(self, batch_size, n_buckets=1, shuffle=False, distributed=False):
         # numericalize all fields
         self.fields = self.transform(self.sentences)
+        # 我要加state和transition就要加到self.fields里面
         # NOTE: the final bucket count is roughly equal to n_buckets
         self.lengths = [len(i) for i in self.fields[next(iter(self.fields))]]
         self.buckets = dict(zip(*kmeans(self.lengths, n_buckets)))

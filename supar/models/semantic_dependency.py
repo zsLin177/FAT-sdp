@@ -6,6 +6,7 @@ from supar.modules import LSTM, MLP, BertEmbedding, Biaffine, CharLSTM
 from supar.modules.dropout import IndependentDropout, SharedDropout
 from supar.utils import Config
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+import pdb
 
 
 class BiaffineSemanticDependencyModel(nn.Module):
@@ -217,6 +218,7 @@ class BiaffineSemanticDependencyModel(nn.Module):
         x, _ = self.lstm(x)
         x, _ = pad_packed_sequence(x, True, total_length=seq_len)
         x = self.lstm_dropout(x)
+        # pdb.set_trace()
 
         # apply MLPs to the BiLSTM output states
         edge_d = self.mlp_edge_d(x)

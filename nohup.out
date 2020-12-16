@@ -1,0 +1,50 @@
+2020-12-14 18:45:26 INFO 
+----------------+--------------------------
+Param           |           Value          
+----------------+--------------------------
+mode            |           train          
+path            | exp/sdp.transition.all-dual-do-DM/model
+device          |             5            
+seed            |             1            
+threads         |            16            
+batch_size      |           3000           
+local_rank      |            -1            
+feat            |      tag,char,lemma      
+dynamic         |           True           
+build           |           True           
+max_len         |           None           
+buckets         |            32            
+train           | data/sdp/DM/train.conllu 
+dev             |  data/sdp/DM/dev.conllu  
+test            |  data/sdp/DM/test.conllu 
+embed           |  data/glove.6B.100d.txt  
+unk             |            unk           
+n_embed         |            100           
+bert            |      bert-base-cased     
+window          |             1            
+decode_mode     |           dual           
+----------------+--------------------------
+
+2020-12-14 18:45:26 INFO Building the fields
+  0%|                                    | 0/829728 00:00<?, ?it/s  3%|#2                                  | 27920/829728 00:00<00:02, 279117.75it/s  8%|##7                                 | 64399/829728 00:00<00:02, 300251.49it/s 11%|###8                                | 89130/829728 00:00<00:02, 257496.66it/s 15%|#####4                              | 126013/829728 00:00<00:02, 283128.53it/s 20%|#######                             | 162653/829728 00:00<00:02, 303770.76it/s 24%|########6                           | 200111/829728 00:00<00:01, 321991.48it/s 29%|##########3                         | 237786/829728 00:00<00:01, 336619.28it/s 33%|###########7                        | 270336/829728 00:00<00:02, 278283.10it/s 36%|#############                       | 300764/829728 00:00<00:01, 285587.63it/s 40%|##############3                     | 330002/829728 00:01<00:02, 245098.79it/s 44%|###############9                    | 366506/829728 00:01<00:01, 271898.45it/s 49%|#################5                  | 404205/829728 00:01<00:01, 296696.87it/s 53%|###################1                | 441339/829728 00:01<00:01, 315733.20it/s 58%|####################7               | 478862/829728 00:01<00:01, 331484.67it/s 62%|######################2             | 513452/829728 00:01<00:01, 258248.91it/s                                                                                   Traceback (most recent call last):
+  File "/data5/slzhou/anaconda3/envs/slzhou/lib/python3.7/runpy.py", line 193, in _run_module_as_main
+    "__main__", mod_spec)
+  File "/data5/slzhou/anaconda3/envs/slzhou/lib/python3.7/runpy.py", line 85, in _run_code
+    exec(code, run_globals)
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/cmds/transition_based_semantic_dependency.py", line 99, in <module>
+    main()
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/cmds/transition_based_semantic_dependency.py", line 95, in main
+    parse(parser)
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/cmds/cmd.py", line 46, in parse
+    parser = Parser.build(**args)
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/parsers/transition_based_sdp.py", line 544, in build
+    train = Dataset(transform, args.train)
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/utils/data.py", line 41, in __init__
+    self.sentences = transform.load(data, **kwargs)
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/utils/transform.py", line 371, in load
+    sentences.append(CoNLLSentence(self, lines[start:i]))
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/utils/transform.py", line 430, in __init__
+    super().__init__(transform)
+  File "/data5/slzhou/MRP/graph_based/zynb/parser/supar/utils/transform.py", line 90, in __init__
+    self.keys = set()
+KeyboardInterrupt
