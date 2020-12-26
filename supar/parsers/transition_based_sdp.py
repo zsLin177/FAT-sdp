@@ -68,7 +68,7 @@ class TransitionSemanticDependencyParser(Parser):
         p = args.pro
         k = args.k
 
-        doloss = args.doloss
+        # doloss = args.doloss
 
         random.seed(args.seed)
         self.transform.train()
@@ -99,10 +99,10 @@ class TransitionSemanticDependencyParser(Parser):
             if (epoch <= k):
                 self._train(train.loader, args.decode_mode)
             else:
-                self._d_train(train.loader, args.decode_mode, p, doloss)
-            dev_metric = self._evaluate(dev.loader, args.decode_mode)
+                self._dynamic_train(train.loader, args.decode_mode, p)
+            dev_metric = self._batch_evaluate(dev.loader, args.decode_mode)
             logger.info(f"{'dev:':6} - {dev_metric}")
-            test_metric = self._evaluate(test.loader, args.decode_mode)
+            test_metric = self._batch_evaluate(test.loader, args.decode_mode)
             logger.info(f"{'test:':6} - {test_metric}")
 
             t = datetime.now() - start
@@ -117,7 +117,7 @@ class TransitionSemanticDependencyParser(Parser):
             elapsed += t
             if epoch - best_e >= args.patience:
                 break
-        loss, metric = self.load(**args)._evaluate(test.loader)
+        loss, metric = self.load(**args)._batch_evaluate(test.loader)
 
         logger.info(f"Epoch {best_e} saved")
         logger.info(f"{'dev:':6} {best_metric}")
@@ -177,9 +177,9 @@ class TransitionSemanticDependencyParser(Parser):
 
             logger.info(f"Epoch {epoch} / {args.epochs}:")
             self._train(train.loader, args.decode_mode)
-            dev_metric = self._evaluate(dev.loader, args.decode_mode)
+            dev_metric = self._batch_evaluate(dev.loader, args.decode_mode)
             logger.info(f"{'dev:':6} - {dev_metric}")
-            test_metric = self._evaluate(test.loader, args.decode_mode)
+            test_metric = self._batch_evaluate(test.loader, args.decode_mode)
             logger.info(f"{'test:':6} - {test_metric}")
 
             t = datetime.now() - start
@@ -194,7 +194,7 @@ class TransitionSemanticDependencyParser(Parser):
             elapsed += t
             if epoch - best_e >= args.patience:
                 break
-        loss, metric = self.load(**args)._evaluate(test.loader)
+        loss, metric = self.load(**args)._batch_evaluate(test.loader)
 
         logger.info(f"Epoch {best_e} saved")
         logger.info(f"{'dev:':6} {best_metric}")
@@ -255,6 +255,44 @@ class TransitionSemanticDependencyParser(Parser):
         """
 
         return super().predict(**Config().update(locals()))
+
+    def _dynamic_train(self, loader, mode, p):
+        # 目前仅针对了dual loss
+        # f = open('/data5/slzhou/MRP/graph_based/zynb/parser/happy3.json', 'w')
+        # con = open('/data5/slzhou/MRP/graph_based/zynb/parser/contrast3.json', 'w')
+        # import json
+        all_k = []
+        contrast = []
+        self.model.train()
+        bar, metric = progress_bar(loader), ChartMetric()
+        for words, *feats, edges, labels, transitions, translabel, states in bar:
+            self.optimizer.zero_grad()
+            
+            transition_mask = transitions.ge(0)
+            transition_len = transition_mask.sum(1)
+            contrast.append(transition_len.tolist())
+            mask = words.ne(self.WORD.pad_index)
+            words_len = torch.sum(mask, dim=-1)
+            loss, remain_ks = self.model.dynamic_loss3(words, words_len, feats,
+                                            edges, labels, p)
+            all_k.append(remain_ks)
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(),
+                                        self.args.clip)
+            self.optimizer.step()
+            self.scheduler.step()
+
+            # edge_preds, label_preds = self.model.decode(s_edge, s_label)
+            # metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
+            #        labels.masked_fill(~(edges.gt(0) & mask), -1))
+            bar.set_postfix_str(
+                f"lr: {self.scheduler.get_last_lr()[0]:.4e} - loss: {loss:.4f}"
+            )
+        # json.dump(all_k, f)
+        # f.close()
+        # json.dump(contrast, con)
+        # con.close()
+
 
     def _d_train(self, loader, mode, p, doloss):
         self.model.train()
@@ -362,6 +400,7 @@ class TransitionSemanticDependencyParser(Parser):
                 # mask[:, 0] = 0
                 transition_mask = transitions.ge(0)
                 transition_len = transition_mask.sum(1)
+                # pdb.set_trace()
                 action_score, label_score = self.model(words, feats, states,
                                                        transitions,
                                                        transition_len)
@@ -379,6 +418,50 @@ class TransitionSemanticDependencyParser(Parser):
                 bar.set_postfix_str(
                     f"lr: {self.scheduler.get_last_lr()[0]:.4e} - loss: {loss:.4f}"
                 )
+
+
+    @torch.no_grad()
+    def _batch_evaluate(self, loader, mode):
+        self.model.eval()
+
+        total_loss, metric = 0, ChartMetric()
+
+        if (mode != 'dual'):
+            for words, *feats, edges, labels, transitions, states in loader:
+                mask = words.ne(self.WORD.pad_index)
+                words_len = torch.sum(mask, dim=-1)
+                mask = mask.unsqueeze(1) & mask.unsqueeze(2)
+                mask[:, 0] = 0
+                # s_edge, s_label = self.model(words, feats)
+                # loss = self.model.loss(s_edge, s_label, edges, labels, mask)
+                # total_loss += loss.item()
+
+                edge_preds, label_preds = self.model.batch_decode(
+                    words, words_len, feats)
+                metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
+                       labels.masked_fill(~(edges.gt(0) & mask), -1))
+            # total_loss /= len(loader)
+
+            return metric
+
+        else:
+            for words, *feats, edges, labels, transitions, translabel, states in loader:
+                mask = words.ne(self.WORD.pad_index)
+                words_len = torch.sum(mask, dim=-1)
+                mask = mask.unsqueeze(1) & mask.unsqueeze(2)
+                mask[:, 0] = 0
+                # s_edge, s_label = self.model(words, feats)
+                # loss = self.model.loss(s_edge, s_label, edges, labels, mask)
+                # total_loss += loss.item()
+
+                edge_preds, label_preds = self.model.batch_decode(
+                    words, words_len, feats)
+                metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
+                       labels.masked_fill(~(edges.gt(0) & mask), -1))
+            # total_loss /= len(loader)
+
+            return metric
+
 
     @torch.no_grad()
     def _evaluate(self, loader, mode):

@@ -199,71 +199,123 @@ import random
 # print(z)
 # print(z.shape)
 
-# train_path = 'data/sdp/DM/dev.conllu'
-# WORD = Field('words', pad=pad, unk=unk, bos=bos, lower=True)
-# TAG = Field('tags', bos=bos)
-# CHAR = SubwordField('chars', pad=pad, unk=unk, bos=bos, fix_len=20)
-# LEMMA = Field('lemmas', pad=pad, unk=unk, bos=bos, lower=True)
-# EDGE = ChartField('edges', use_vocab=False, fn=CoNLL.get_edges)
-# LABEL = ChartField('labels', fn=CoNLL.get_labels)
-# Transition = TransitionField('transitions', label_field=LABEL)
-# State = StateField('states', label_field=LABEL, transition_field=Transition)
-# transform = CoNLL(FORM=(WORD, CHAR, None),
-#                   LEMMA=LEMMA,
-#                   POS=TAG,
-#                   PHEAD=(EDGE, LABEL, Transition, State))
+train_path = 'data/sdp/DM/dev.conllu'
+WORD = Field('words', pad=pad, unk=unk, bos=bos, lower=True)
+TAG = Field('tags', bos=bos)
+CHAR = SubwordField('chars', pad=pad, unk=unk, bos=bos, fix_len=20)
+LEMMA = Field('lemmas', pad=pad, unk=unk, bos=bos, lower=True)
+EDGE = ChartField('edges', use_vocab=False, fn=CoNLL.get_edges)
+LABEL = ChartField('labels', fn=CoNLL.get_labels)
+Transition = TransitionField('transitions', label_field=LABEL)
+State = StateField('states', label_field=LABEL, transition_field=Transition)
+transform = CoNLL(FORM=(WORD, CHAR, None),
+                  LEMMA=LEMMA,
+                  POS=TAG,
+                  PHEAD=(EDGE, LABEL, Transition, State))
 
-# train = Dataset(transform, train_path)
-# WORD.build(train, 7, (None))
-# TAG.build(train)
-# CHAR.build(train)
-# LEMMA.build(train)
-# LABEL.build(train)
-# Transition.build(train)
+train = Dataset(transform, train_path)
+WORD.build(train, 7, (None))
+TAG.build(train)
+CHAR.build(train)
+LEMMA.build(train)
+LABEL.build(train)
+Transition.build(train)
 
-# train.build(3000, 32)
-# batch = next(iter(train.loader))
-# print(batch)
-# for x in batch:
-#     print(x.shape)
+train.build(3000, 32)
+batch = next(iter(train.loader))
+print(batch)
+for x in batch:
+    print(x.shape)
 
-
-def padding(tensors, padding_value=0, total_length=None):
-    size = [len(tensors)] + [
-        max(tensor.size(i) for tensor in tensors)
-        for i in range(len(tensors[0].size()))
-    ]
-    if total_length is not None:
-        assert total_length >= size[1]
-        size[1] = total_length
-    out_tensor = tensors[0].data.new(*size).fill_(padding_value)
-    for i, tensor in enumerate(tensors):
-        out_tensor[i][[slice(0, i) for i in tensor.size()]] = tensor
-    return out_tensor
+print(Transition.vocab.stoi)
 
 
-seq_len = 10
-batch_size = 3
-words_len = torch.tensor([5, 7, 10], dtype=torch.long)
-x = torch.tensor([[0] + [-1] * (seq_len - 1), [-1] * seq_len, [-1] * seq_len],
-                 dtype=torch.long)
-x = x.unsqueeze(0).expand(batch_size, -1, -1)
+# def padding(tensors, padding_value=0, total_length=None):
+#     size = [len(tensors)] + [
+#         max(tensor.size(i) for tensor in tensors)
+#         for i in range(len(tensors[0].size()))
+#     ]
+#     if total_length is not None:
+#         assert total_length >= size[1]
+#         size[1] = total_length
+#     out_tensor = tensors[0].data.new(*size).fill_(padding_value)
+#     for i, tensor in enumerate(tensors):
+#         out_tensor[i][[slice(0, i) for i in tensor.size()]] = tensor
+#     return out_tensor
 
-y = []
-for length in words_len:
-    y.append(torch.arange(1, length.item(), dtype=torch.long))
 
-out = padding(y, -1, 10).reshape(batch_size, 1, -1)
-init_stat = torch.cat((x, out), dim=1)
-init_stat = init_stat[:, [0, 3, 2, 1]]
-print(init_stat)
+# seq_len = 10
+# batch_size = 3
+# words_len = torch.tensor([5, 7, 10], dtype=torch.long)
+# x = torch.tensor([[0] + [-1] * (seq_len - 1), [-1] * seq_len, [-1] * seq_len],
+#                  dtype=torch.long)
+# x = x.unsqueeze(0).expand(batch_size, -1, -1)
 
-init_stat[1, 1, 0] = -1
-init_stat[0, 1, 0] = -1
-init_stat[2, 1, 0] = -1
+# y = []
+# for length in words_len:
+#     y.append(torch.arange(1, length.item(), dtype=torch.long))
 
-mask = init_stat[:, 1, 0].gt(-1)
-print(mask)
-print(not mask.sum())
-remain = init_stat[mask]
-print(remain)
+# out = padding(y, -1, 10).reshape(batch_size, 1, -1)
+# init_stat = torch.cat((x, out), dim=1)
+# init_stat = init_stat[:, [0, 3, 2, 1]]
+# print(init_stat)
+
+# init_stat[1, 1, 0] = -1
+# init_stat[0, 1, 0] = -1
+# init_stat[2, 1, 0] = -1
+
+# mask = init_stat[:, 1, 0].gt(-1)
+# print(mask)
+# print(not mask.sum())
+# remain = init_stat[mask]
+# print(remain)
+
+# x = torch.ones((3, 7), dtype=torch.long)
+# print(x)
+# mask = torch.tensor([True, False, False]).reshape(3, -1)
+# print(mask)
+# m1 = x.gt(0) & mask
+# print(m1)
+
+# col_cond1 = torch.zeros(7).index_fill_(-1, torch.tensor([2, 4, 6]), 1).gt(0)
+# m2 = m1 * col_cond1
+# x.masked_fill_(~m2, 0)
+# print(x)
+
+# x = torch.randint(-1, 3, (2, 4, 10))
+# print(x)
+# mask = x[:, 0, 0] == x[:, 1, 0]
+# print(mask)
+
+# x = torch.randint(0, 10, (4, 4, 7))
+# edge = torch.randint(-1, 1, (4, 10, 10))
+
+# stack_isnot_clear = torch.tensor([True, False, False, True]).int()
+# print(stack_isnot_clear)
+# idx = (stack_isnot_clear == 1).nonzero().squeeze(1)
+# print(idx)
+
+# mask = torch.tensor([True, False, False, True])
+# print(x[mask])
+
+# seq_len = 10
+# x = torch.randint(-1, 10, (4, 4, 10))
+# edge = torch.randint(0, 2, (4, 10, 10))
+# stack_head = x[:, 0, 0]
+# print(stack_head)
+# condicate_b = x[:, 1, 1:]
+# print(condicate_b)
+# stack_head = stack_head.unsqueeze(1).expand(-1, seq_len-1)
+# print(stack_head)
+# print(edge)
+
+# import json
+# lst1 = [1, 2, 3]
+# lst2 = [3, 2, 1, 0]
+# lst = [lst1, lst2]
+# with open ('happy.json', 'w') as f:
+#     json.dump(lst, f)
+    
+
+
+
