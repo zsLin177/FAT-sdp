@@ -150,7 +150,7 @@ class TransitionSemanticDependencyModel(nn.Module):
         self.transition_embed = nn.Embedding(num_embeddings=n_transitions + 1,
                                              embedding_dim=n_transition_embed)
         self.transition_embed_droupout = IndependentDropout(p=embed_dropout)
-        self.new_droupout = nn.Dropout(p=embed_dropout)
+        # self.new_droupout = nn.Dropout(p=embed_dropout)
 
         # the lstm layer
         self.lstm = LSTM(input_size=self.n_input,
@@ -613,10 +613,10 @@ class TransitionSemanticDependencyModel(nn.Module):
         transitions = transitions.reshape(batch_size,
                                           -1)  # [batch_size, pad_len*window]
 
-        # transitions_embed = self.transition_embed_droupout(
-        #     self.transition_embed(transitions))[0]
-        transitions_embed = self.new_droupout(
-            self.transition_embed(transitions))
+        transitions_embed = self.transition_embed_droupout(
+            self.transition_embed(transitions))[0]
+        # transitions_embed = self.new_droupout(
+        #     self.transition_embed(transitions))
 
         transitions_embed = transitions_embed.reshape(batch_size,
                                                       padded_transition_len,
@@ -1439,7 +1439,6 @@ class TransitionSemanticDependencyModel(nn.Module):
             valid4_mask = valid4_mask * col_cond4
             valid4.masked_fill_(~valid4_mask, 0)
             valid_actions = valid1 + valid2 + valid3 + valid4
-            # pdb.set_trace()
             # [k, 7]
 
             # 求correct集合
@@ -1450,12 +1449,12 @@ class TransitionSemanticDependencyModel(nn.Module):
             correct_labels = torch.ones(
                 (k, len(self.transition_vocab)),
                 dtype=torch.long,
-                device=words.device).masked_fill_(base_mask, self.n_labels)
+                device=words.device).masked_fill(base_mask, self.n_labels)
             # 暂时correct labels存的还是一个，不是多个，对应less correct的版本
 
             stack_isnot_clear = valid_mask_sg0.clone()
             # [k]
-            stack_is_clear = ~stack_isnot_clear.unsqueeze(1)
+            stack_is_clear = (~stack_isnot_clear).unsqueeze(1)
             ns_mask = base_mask & stack_is_clear
             col_ns_mask = torch.zeros(len(self.transition_vocab),
                                       device=words.device).index_fill_(
@@ -1464,13 +1463,14 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                        device=words.device),
                                           1).gt(0)
             ns_mask = ns_mask * col_ns_mask
-            correct_actions.masked_fill_(ns_mask, 1)
+            correct_actions = correct_actions.masked_fill(ns_mask, 1)
             # correct_labels里面存的就是self.n_labels，所以不要动
 
-            stack_isnot_clear_idx = (
-                stack_isnot_clear.int() == 1).nonzero().squeeze(1)
+            # stack_isnot_clear_idx = (
+            #     stack_isnot_clear.int() == 1).nonzero().squeeze(1)
             # [m] 保存的是k个里面stack非空的那些的下标
-            if (stack_isnot_clear_idx.shape[0] > 0):
+            # if (stack_isnot_clear_idx.shape[0] > 0):
+            if (stack_isnot_clear.sum().item() > 0):
                 stack_exist_stat = remain_stat[stack_isnot_clear]
                 m = stack_exist_stat.shape[0]
                 # [m, 4, seq_len]
@@ -1480,7 +1480,9 @@ class TransitionSemanticDependencyModel(nn.Module):
                 m_labels = torch.ones(
                     (m, len(self.transition_vocab)),
                     dtype=torch.long,
-                    device=words.device).masked_fill_(base_mask, self.n_labels)
+                    device=words.device)
+                m_base_mask = m_labels.gt(0)
+                m_labels = m_labels.masked_fill(m_base_mask, self.n_labels)
 
                 stack_exist_edge = remain_edge[stack_isnot_clear]
                 stack_exist_label = remain_label[stack_isnot_clear]
@@ -1514,6 +1516,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                 sh1 = stack_head.unsqueeze(1).expand(-1, seq_len).unsqueeze(1)
                 # [m, 1, seq_len]
                 sh2 = stack_head.unsqueeze(1).expand(-1, seq_len - 1)
+                # [m, seq_len-1]
                 condicate_b = stack_exist_stat[:, 1, 1:].clone()
                 # [m, seq_len-1]
                 g1 = torch.gather(stack_exist_edge, 1, sh1)
@@ -1543,8 +1546,8 @@ class TransitionSemanticDependencyModel(nn.Module):
                 if_beta_i = m3.sum(1).gt(0)
                 # [m] 有没有从i指向beta的边
                 or_beta_i = if_beta_i + if_i_beta
-                final_lr = ~exist_right & ~or_beta_i
-                # [m]  不存在向右的边 and i与beta之间没有边
+                final_lr = (~exist_right) & (~or_beta_i)
+                # [m]  不存在向右的边 and i与beta之间没有边 ,TODO: 加上要存在向左的边这个条件
                 final_lr_1 = final_lr.unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 # [m, n_actions]
@@ -1556,9 +1559,11 @@ class TransitionSemanticDependencyModel(nn.Module):
                                          1).gt(0)
                 lr_mask = final_lr_1 * col_lr
                 # [m, n_actions]
-                m_actions.masked_fill_(lr_mask, 1)
+                # m_actions.masked_fill_(lr_mask, 1)
+                m_actions = m_actions.masked_fill(lr_mask, 1)
                 m_labels = m_labels.masked_scatter(lr_mask,
                                                    left_label[final_lr])
+                # pdb.set_trace()
 
                 buffer_head = stack_exist_stat[:, 1, 0].clone()
                 sh1 = buffer_head.unsqueeze(1).expand(-1, seq_len).unsqueeze(1)
@@ -1583,8 +1588,8 @@ class TransitionSemanticDependencyModel(nn.Module):
                 if_sigma_j = m3.sum(1).gt(0)
                 # [m] 有没有从j指向sigma的边
                 or_sigma_j = if_j_sigma + if_sigma_j
-                final_rs = ~exist_left & ~or_sigma_j
-                # [m] 不存在向左边的边 且 j与sigma之间没有边
+                final_rs = (~exist_left) & (~or_sigma_j)
+                # [m] 不存在向左边的边 且 j与sigma之间没有边, TODO: 加上要存在向左的边这个条件
                 final_rs_1 = final_rs.unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_rs = torch.zeros(len(self.transition_vocab),
@@ -1594,7 +1599,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                       device=words.device),
                                          1).gt(0)
                 rs_mask = final_rs_1 * col_rs
-                m_actions.masked_fill_(rs_mask, 1)
+                m_actions = m_actions.masked_fill(rs_mask, 1)
                 m_labels = m_labels.masked_scatter(rs_mask,
                                                    right_label[final_rs])
 
@@ -1604,7 +1609,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                 # [m] 有没有从stack指向j的边
                 or_stack_j = if_stack_j + if_j_stack
                 # [m] stack与j之间有没有边
-                final_ns = ~or_stack_j.unsqueeze(1).expand(
+                final_ns = (~or_stack_j).unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_ns = torch.zeros(len(self.transition_vocab),
                                      device=words.device).index_fill_(
@@ -1613,7 +1618,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                       device=words.device),
                                          1).gt(0)
                 Ns_mask = final_ns * col_ns
-                m_actions.masked_fill_(Ns_mask, 1)
+                m_actions = m_actions.masked_fill(Ns_mask, 1)
                 # 因为m_labels里面初始化为self.n_labels，所以不要动
 
                 if_buffer_i = exist_right + if_beta_i
@@ -1621,7 +1626,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                 if_i_buffer = exist_left + if_i_beta
                 # 有没有从buffer指向i的边
                 or_buffer_i = if_buffer_i + if_i_buffer
-                final_nr = ~or_buffer_i.unsqueeze(1).expand(
+                final_nr = (~or_buffer_i).unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_nr = torch.zeros(len(self.transition_vocab),
                                      device=words.device).index_fill_(
@@ -1630,9 +1635,9 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                       device=words.device),
                                          1).gt(0)
                 nr_mask = final_nr * col_nr
-                m_actions.masked_fill_(nr_mask, 1)
+                m_actions = m_actions.masked_fill(nr_mask, 1)
 
-                final_lp = ~exist_right
+                final_lp = ~exist_right  # TODO: 加上要存在向左的边这个条件
                 final_lp_1 = final_lp.unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_lp = torch.zeros(len(self.transition_vocab),
@@ -1642,11 +1647,11 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                       device=words.device),
                                          1).gt(0)
                 lp_mask = final_lp_1 * col_lp
-                m_actions.masked_fill_(lp_mask, 1)
+                m_actions = m_actions.masked_fill(lp_mask, 1)
                 m_labels = m_labels.masked_scatter(lp_mask,
                                                    left_label[final_lp])
 
-                final_rp = ~exist_left
+                final_rp = ~exist_left  # TODO: 加上要存在向左的边这个条件
                 final_rp_1 = final_rp.unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_rp = torch.zeros(len(self.transition_vocab),
@@ -1657,12 +1662,12 @@ class TransitionSemanticDependencyModel(nn.Module):
                                          1).gt(0)
 
                 rp_mask = final_rp_1 * col_rp
-                m_actions.masked_fill_(rp_mask, 1)
+                m_actions = m_actions.masked_fill(rp_mask, 1)
                 m_labels = m_labels.masked_scatter(rp_mask,
                                                    right_label[final_rp])
 
                 exist_arc = exist_left + exist_right
-                final_np = ~exist_arc.unsqueeze(1).expand(
+                final_np = (~exist_arc).unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_np = torch.zeros(len(self.transition_vocab),
                                      device=words.device).index_fill_(
@@ -1671,7 +1676,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                       device=words.device),
                                          1).gt(0)
                 np_mask = final_np * col_np
-                m_actions.masked_fill_(np_mask, 1)
+                m_actions = m_actions.masked_fill(np_mask, 1)
 
                 # 至此m_actions,m_labels填充完毕 [m, len(self.n_transition)]
                 # example: m_actions[0]: [0, 0, 1, 1, 0, 1, 0]
@@ -1686,7 +1691,6 @@ class TransitionSemanticDependencyModel(nn.Module):
                 # 把stack非空的填回去了
 
             # 对valid和correct求交集
-            # pdb.set_trace()
             valid_mask = valid_actions.gt(0)
             correct_mask = correct_actions.gt(0)
             intersect_mask = valid_mask & correct_mask
@@ -1723,8 +1727,12 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                   self.n_transitions)
             transitions = transitions.reshape(k, -1)
             # [k, 1]
-            transitions_embed = self.new_droupout(
-                self.transition_embed(transitions)).reshape(k, -1)
+            # transitions_embed = self.new_droupout(
+            #     self.transition_embed(transitions)).reshape(k, -1)
+
+            transitions_embed = self.transition_embed_droupout(
+                self.transition_embed(transitions))[0].reshape(k, -1)
+
             # [k, n_transition_embed]
             final_repr = torch.cat((transitions_embed, states_hidden), -1)
             # [k, n_transition_embed+3*lstm_out_size]
@@ -1751,23 +1759,21 @@ class TransitionSemanticDependencyModel(nn.Module):
             # [k] 存放的是oracle label
 
             # 计算这一步的loss
-            # step_action_loss = self.criterion(action_score, o_action)
-            step_action_loss = self.criterion(action_score, pred_action)  # 让优化目标就是自己
+            step_action_loss = self.criterion(action_score, o_action)
+            # step_action_loss = self.criterion(action_score, pred_action)  # 让优化目标就是自己
             this_step_action_embed = self.transition_embed(pred_action)
             # [k, n_transition_embed]
             label_final_repr = torch.cat((final_repr, this_step_action_embed), -1)
             label_score = self.label_mlp(label_final_repr)
 
             pred_label = torch.argmax(label_score, dim=1)
-            step_label_loss = self.criterion(label_score, pred_label)  # 让优化目标就是自己
-
-            # step_label_loss = self.criterion(label_score, o_label)
+            # step_label_loss = self.criterion(label_score, pred_label)  # 让优化目标就是自己
+            step_label_loss = self.criterion(label_score, o_label)
             step_loss = step_action_loss + step_label_loss
             # 已经对batch求了平均
             losses.append(step_loss)
             # 现在这边是把每一步的loss求和后平均再反向传播，如果这造成现存爆炸，可以一步之后就backward（还是一个batch再update）
             
-
             pro = torch.rand(k, device=words.device)
             # [k] 对应k个状态follow pred的概率,小于p则follow pred的，大于则follow o_action
             follow_pred = pro.lt(p)
@@ -1822,6 +1828,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                 require_shift = require_shift.masked_scatter(shift_action_mask, followed_action[Shift_mask])
                 back_shift_mask = Shift_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
                 remain_stat = remain_stat.masked_scatter(back_shift_mask, require_shift)
+                
             # 到此remain_stat修改完毕,接下来把状态写回save_stat
             state_back_mask = unfinish_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
             save_stat = save_stat.masked_scatter(state_back_mask, remain_stat)
@@ -2021,8 +2028,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                   self.n_transitions)
             transitions = transitions.reshape(k, -1)
             # [k, 1]
-            transitions_embed = self.new_droupout(
-                self.transition_embed(transitions)).reshape(k, -1)
+            transitions_embed = self.transition_embed(transitions).reshape(k, -1)
             # [k, n_transition_embed]
             final_repr = torch.cat((transitions_embed, states_hidden), -1)
             # [k, n_transition_embed+3*lstm_out_size]
