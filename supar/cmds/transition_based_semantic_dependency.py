@@ -76,9 +76,14 @@ def main():
                            type=int,
                            help='num of cell feature')
 
-    subparser.add_argument('--decode_mode',
-                           default='mlp',
-                           help='the decoder to use: mlp, att, lstm, beta, dual')
+    # subparser.add_argument('--decode_mode',
+    #                        default='dual',
+    #                        help='the decoder to use: mlp, att, lstm, beta, dual')
+
+    subparser.add_argument('--loss_type',
+                           default='Formal',
+                           help='the used loss type: CrossEntropyLoss, MLL(multilabelloss)')
+    
 
 
     # evaluate

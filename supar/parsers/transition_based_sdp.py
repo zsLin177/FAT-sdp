@@ -59,7 +59,7 @@ class TransitionSemanticDependencyParser(Parser):
                       verbose=True,
                       clip=5.0,
                       epochs=5000,
-                      patience=100,
+                      patience=200,
                       **kwargs):
 
         args = self.args.update(locals())
@@ -267,18 +267,17 @@ class TransitionSemanticDependencyParser(Parser):
         bar, metric = progress_bar(loader), ChartMetric()
         for words, *feats, edges, labels, transitions, translabel, states in bar:
             self.optimizer.zero_grad()
-            
+
             transition_mask = transitions.ge(0)
             transition_len = transition_mask.sum(1)
             contrast.append(transition_len.tolist())
             mask = words.ne(self.WORD.pad_index)
             words_len = torch.sum(mask, dim=-1)
-            loss, remain_ks = self.model.dynamic_loss3(words, words_len, feats,
-                                            edges, labels, p)
+            loss, remain_ks = self.model.dynamic_loss4(words, words_len, feats,
+                                                       edges, labels, p)
             all_k.append(remain_ks)
             loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(),
-                                        self.args.clip)
+            nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
             self.optimizer.step()
             self.scheduler.step()
 
@@ -292,7 +291,6 @@ class TransitionSemanticDependencyParser(Parser):
         # f.close()
         # json.dump(contrast, con)
         # con.close()
-
 
     def _d_train(self, loader, mode, p, doloss):
         self.model.train()
@@ -349,7 +347,7 @@ class TransitionSemanticDependencyParser(Parser):
                     else:
                         loss = self.model.dynamic_loss2(
                             words, words_len, feats, edges, labels)
-                    
+
                     loss.backward()
                     nn.utils.clip_grad_norm_(self.model.parameters(),
                                              self.args.clip)
@@ -419,7 +417,6 @@ class TransitionSemanticDependencyParser(Parser):
                     f"lr: {self.scheduler.get_last_lr()[0]:.4e} - loss: {loss:.4f}"
                 )
 
-
     @torch.no_grad()
     def _batch_evaluate(self, loader, mode):
         self.model.eval()
@@ -462,7 +459,6 @@ class TransitionSemanticDependencyParser(Parser):
 
             return metric
 
-
     @torch.no_grad()
     def _evaluate(self, loader, mode):
         self.model.eval()
@@ -479,7 +475,7 @@ class TransitionSemanticDependencyParser(Parser):
                 # loss = self.model.loss(s_edge, s_label, edges, labels, mask)
                 # total_loss += loss.item()
 
-                edge_preds, label_preds = self.model.decode(
+                edge_preds, label_preds = self.model.batch_decode(
                     words, words_len, feats)
                 metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
                        labels.masked_fill(~(edges.gt(0) & mask), -1))
@@ -497,7 +493,7 @@ class TransitionSemanticDependencyParser(Parser):
                 # loss = self.model.loss(s_edge, s_label, edges, labels, mask)
                 # total_loss += loss.item()
 
-                edge_preds, label_preds = self.model.decode(
+                edge_preds, label_preds = self.model.batch_decode(
                     words, words_len, feats)
                 metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
                        labels.masked_fill(~(edges.gt(0) & mask), -1))
@@ -653,6 +649,7 @@ class TransitionSemanticDependencyParser(Parser):
             'pad_index': WORD.pad_index,
             'unk_index': WORD.unk_index,
             'window': args.window,
+            'loss_type': args.loss_type,
             'n_transitions': len(Transition.vocab),
             'transition_vocab': Transition.vocab,
             'n_transition_embed': 600

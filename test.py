@@ -199,35 +199,35 @@ import random
 # print(z)
 # print(z.shape)
 
-train_path = 'data/sdp/DM/dev.conllu'
-WORD = Field('words', pad=pad, unk=unk, bos=bos, lower=True)
-TAG = Field('tags', bos=bos)
-CHAR = SubwordField('chars', pad=pad, unk=unk, bos=bos, fix_len=20)
-LEMMA = Field('lemmas', pad=pad, unk=unk, bos=bos, lower=True)
-EDGE = ChartField('edges', use_vocab=False, fn=CoNLL.get_edges)
-LABEL = ChartField('labels', fn=CoNLL.get_labels)
-Transition = TransitionField('transitions', label_field=LABEL)
-State = StateField('states', label_field=LABEL, transition_field=Transition)
-transform = CoNLL(FORM=(WORD, CHAR, None),
-                  LEMMA=LEMMA,
-                  POS=TAG,
-                  PHEAD=(EDGE, LABEL, Transition, State))
+# train_path = 'data/sdp/DM/dev.conllu'
+# WORD = Field('words', pad=pad, unk=unk, bos=bos, lower=True)
+# TAG = Field('tags', bos=bos)
+# CHAR = SubwordField('chars', pad=pad, unk=unk, bos=bos, fix_len=20)
+# LEMMA = Field('lemmas', pad=pad, unk=unk, bos=bos, lower=True)
+# EDGE = ChartField('edges', use_vocab=False, fn=CoNLL.get_edges)
+# LABEL = ChartField('labels', fn=CoNLL.get_labels)
+# Transition = TransitionField('transitions', label_field=LABEL)
+# State = StateField('states', label_field=LABEL, transition_field=Transition)
+# transform = CoNLL(FORM=(WORD, CHAR, None),
+#                   LEMMA=LEMMA,
+#                   POS=TAG,
+#                   PHEAD=(EDGE, LABEL, Transition, State))
 
-train = Dataset(transform, train_path)
-WORD.build(train, 7, (None))
-TAG.build(train)
-CHAR.build(train)
-LEMMA.build(train)
-LABEL.build(train)
-Transition.build(train)
+# train = Dataset(transform, train_path)
+# WORD.build(train, 7, (None))
+# TAG.build(train)
+# CHAR.build(train)
+# LEMMA.build(train)
+# LABEL.build(train)
+# Transition.build(train)
 
-train.build(3000, 32)
-batch = next(iter(train.loader))
-print(batch)
-for x in batch:
-    print(x.shape)
+# train.build(3000, 32)
+# batch = next(iter(train.loader))
+# print(batch)
+# for x in batch:
+#     print(x.shape)
 
-print(Transition.vocab.stoi)
+# print(Transition.vocab.stoi)
 
 
 # def padding(tensors, padding_value=0, total_length=None):
@@ -316,6 +316,7 @@ print(Transition.vocab.stoi)
 # with open ('happy.json', 'w') as f:
 #     json.dump(lst, f)
     
+
 
 
 

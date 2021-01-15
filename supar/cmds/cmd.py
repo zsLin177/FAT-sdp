@@ -31,6 +31,11 @@ def parse(parser):
                         type=int,
                         default=-1,
                         help='node rank for distributed training')
+
+    parser.add_argument('--decode_mode',
+                        default='dual',
+                        help='the decoder to use: mlp, att, lstm, beta, dual')
+
     args, unknown = parser.parse_known_args()
     args, _ = parser.parse_known_args(unknown, args)
     args = Config(**vars(args))

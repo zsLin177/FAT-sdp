@@ -88,6 +88,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                  n_transitions,
                  transition_vocab,
                  decode_mode,
+                 loss_type='Formal',
                  n_tags=None,
                  n_chars=None,
                  n_lemmas=None,
@@ -120,6 +121,7 @@ class TransitionSemanticDependencyModel(nn.Module):
         self.decode_mode = decode_mode
         self.transition_vocab = transition_vocab
         self.n_labels = n_labels  # 不算空label的数量
+        self.loss_type = loss_type
         # the embedding layer
         self.word_embed = nn.Embedding(num_embeddings=n_words,
                                        embedding_dim=n_embed)
@@ -216,8 +218,13 @@ class TransitionSemanticDependencyModel(nn.Module):
                                  activation=False)
 
         self.activation = nn.functional.relu
-
         self.criterion = nn.CrossEntropyLoss()
+
+        if(loss_type == 'Formal'):
+            self.do_criterion = nn.CrossEntropyLoss()
+        elif(loss_type == 'MLL'):
+            self.do_criterion = nn.MultiLabelSoftMarginLoss()
+        
         self.pad_index = pad_index
         self.unk_index = unk_index
 
@@ -715,7 +722,6 @@ class TransitionSemanticDependencyModel(nn.Module):
         label_loss = self.criterion(label_score[mask], gold_label[mask])
         return action_loss + label_loss
 
-    
     def decode(self, words, words_len, feats):
         r"""
         words: [batch_size, seq_len]
@@ -1351,7 +1357,7 @@ class TransitionSemanticDependencyModel(nn.Module):
             ]
             for action_ in ["LR", "LP", "RS", "RP", "NS", "NR", "NP"]
         }
-        
+
         losses = []
         remain_ks = []
         step = 0
@@ -1365,7 +1371,7 @@ class TransitionSemanticDependencyModel(nn.Module):
             remain_x = x[unfinish_mask]
             # [k, seq_len+1, lstm_out_size]
             k = remain_stat.shape[0]
-            remain_ks.append(k/batch_size)
+            remain_ks.append(k / batch_size)
 
             valid1 = torch.ones((k, len(self.transition_vocab)),
                                 dtype=torch.long,
@@ -1477,10 +1483,9 @@ class TransitionSemanticDependencyModel(nn.Module):
                 m_actions = torch.zeros((m, len(self.transition_vocab)),
                                         dtype=torch.long,
                                         device=words.device)
-                m_labels = torch.ones(
-                    (m, len(self.transition_vocab)),
-                    dtype=torch.long,
-                    device=words.device)
+                m_labels = torch.ones((m, len(self.transition_vocab)),
+                                      dtype=torch.long,
+                                      device=words.device)
                 m_base_mask = m_labels.gt(0)
                 m_labels = m_labels.masked_fill(m_base_mask, self.n_labels)
 
@@ -1577,7 +1582,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                 if_j_sigma = g2.sum(1).gt(0)
                 # [m] 有没有从sigma指向j的边
 
-                sh1 = sh1.expand(-1, seq_len-1, -1)
+                sh1 = sh1.expand(-1, seq_len - 1, -1)
                 m1 = condicate_s.unsqueeze(2).expand(-1, -1, seq_len)
                 m1_mask = m1.eq(-1)
                 m1 = m1.masked_scatter(m1_mask, sh1[m1_mask])
@@ -1589,7 +1594,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                 # [m] 有没有从j指向sigma的边
                 or_sigma_j = if_j_sigma + if_sigma_j
                 final_rs = (~exist_left) & (~or_sigma_j)
-                # [m] 不存在向左边的边 且 j与sigma之间没有边, TODO: 加上要存在向左的边这个条件
+                # [m] 不存在向左边的边 且 j与sigma之间没有边, TODO: 加上要存在向右的边这个条件
                 final_rs_1 = final_rs.unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_rs = torch.zeros(len(self.transition_vocab),
@@ -1651,7 +1656,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                 m_labels = m_labels.masked_scatter(lp_mask,
                                                    left_label[final_lp])
 
-                final_rp = ~exist_left  # TODO: 加上要存在向左的边这个条件
+                final_rp = ~exist_left  # TODO: 加上要存在向右的边这个条件
                 final_rp_1 = final_rp.unsqueeze(1).expand(
                     -1, len(self.transition_vocab))
                 col_rp = torch.zeros(len(self.transition_vocab),
@@ -1763,7 +1768,8 @@ class TransitionSemanticDependencyModel(nn.Module):
             # step_action_loss = self.criterion(action_score, pred_action)  # 让优化目标就是自己
             this_step_action_embed = self.transition_embed(pred_action)
             # [k, n_transition_embed]
-            label_final_repr = torch.cat((final_repr, this_step_action_embed), -1)
+            label_final_repr = torch.cat((final_repr, this_step_action_embed),
+                                         -1)
             label_score = self.label_mlp(label_final_repr)
 
             pred_label = torch.argmax(label_score, dim=1)
@@ -1773,18 +1779,24 @@ class TransitionSemanticDependencyModel(nn.Module):
             # 已经对batch求了平均
             losses.append(step_loss)
             # 现在这边是把每一步的loss求和后平均再反向传播，如果这造成现存爆炸，可以一步之后就backward（还是一个batch再update）
-            
+
             pro = torch.rand(k, device=words.device)
             # [k] 对应k个状态follow pred的概率,小于p则follow pred的，大于则follow o_action
             follow_pred = pro.lt(p)
-            followed_action = pred_action.masked_scatter(~follow_pred, o_action[~follow_pred])
+            followed_action = pred_action.masked_scatter(
+                ~follow_pred, o_action[~follow_pred])
             # [k] k个state真正要执行的action的下标
 
             # 之后就是要对这k个state去进行操作了
             # TODO: 这种写法不好，要确保只是只包含一个
-            Reduce_mask = followed_action.eq(action_id['LR'][0]) + followed_action.eq(action_id['NR'][0])
-            Pass_mask = followed_action.eq(action_id['LP'][0]) + followed_action.eq(action_id['NP'][0]) + followed_action.eq(action_id['RP'][0])
-            Shift_mask = followed_action.eq(action_id['RS'][0]) + followed_action.eq(action_id['NS'][0])
+            Reduce_mask = followed_action.eq(
+                action_id['LR'][0]) + followed_action.eq(action_id['NR'][0])
+            Pass_mask = followed_action.eq(
+                action_id['LP'][0]) + followed_action.eq(
+                    action_id['NP'][0]) + followed_action.eq(
+                        action_id['RP'][0])
+            Shift_mask = followed_action.eq(
+                action_id['RS'][0]) + followed_action.eq(action_id['NS'][0])
             # [k]
 
             with torch.no_grad():
@@ -1793,9 +1805,12 @@ class TransitionSemanticDependencyModel(nn.Module):
                 require_reduce[:, 0, -1] = -1
                 reduce_action_mask = ~require_reduce.ge(-1)
                 reduce_action_mask[:, 3, 0] = True
-                require_reduce = require_reduce.masked_scatter(reduce_action_mask, followed_action[Reduce_mask])
-                back_reduce_mask = Reduce_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
-                remain_stat = remain_stat.masked_scatter(back_reduce_mask, require_reduce)
+                require_reduce = require_reduce.masked_scatter(
+                    reduce_action_mask, followed_action[Reduce_mask])
+                back_reduce_mask = Reduce_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_reduce_mask, require_reduce)
 
                 require_pass = remain_stat[Pass_mask]
                 require_pass[:, 2, 1:] = require_pass[:, 2, :-1].clone()
@@ -1804,9 +1819,12 @@ class TransitionSemanticDependencyModel(nn.Module):
                 require_pass[:, 0, -1] = -1
                 pass_action_mask = ~require_pass.ge(-1)
                 pass_action_mask[:, 3, 0] = True
-                require_pass = require_pass.masked_scatter(pass_action_mask, followed_action[Pass_mask])
-                back_pass_mask = Pass_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
-                remain_stat = remain_stat.masked_scatter(back_pass_mask, require_pass)
+                require_pass = require_pass.masked_scatter(
+                    pass_action_mask, followed_action[Pass_mask])
+                back_pass_mask = Pass_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_pass_mask, require_pass)
 
                 require_shift = remain_stat[Shift_mask]
                 buffer_top = require_shift[:, 1, 0].unsqueeze(1)
@@ -1819,29 +1837,1239 @@ class TransitionSemanticDependencyModel(nn.Module):
                 f_mask = torch.cat((b_rd_mask, cat_mask), -1)
                 stack_mask = ~require_shift.ge(-1)
                 stack_mask[:, 0] = True
-                require_shift = require_shift.masked_scatter(stack_mask, b_rd_s[f_mask.cumsum(1).le(seq_len)&f_mask])
+                require_shift = require_shift.masked_scatter(
+                    stack_mask, b_rd_s[f_mask.cumsum(1).le(seq_len) & f_mask])
                 require_shift[:, 1, :-1] = require_shift[:, 1, 1:].clone()
                 require_shift[:, 1, -1] = -1
                 require_shift[:, 2] = -1
                 shift_action_mask = ~require_shift.ge(-1)
                 shift_action_mask[:, 3, 0] = True
-                require_shift = require_shift.masked_scatter(shift_action_mask, followed_action[Shift_mask])
-                back_shift_mask = Shift_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
-                remain_stat = remain_stat.masked_scatter(back_shift_mask, require_shift)
-                
+                require_shift = require_shift.masked_scatter(
+                    shift_action_mask, followed_action[Shift_mask])
+                back_shift_mask = Shift_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_shift_mask, require_shift)
+
             # 到此remain_stat修改完毕,接下来把状态写回save_stat
-            state_back_mask = unfinish_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+            state_back_mask = unfinish_mask.unsqueeze(1).expand(
+                -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
             save_stat = save_stat.masked_scatter(state_back_mask, remain_stat)
             unfinish_mask = save_stat[:, 1, 0].gt(-1)
             # [batch_size]
-        
+
         # losses中存储了每一步的loss
         # loss = torch.sum(torch.stack(losses)) / (len(losses) + 1)
         # print(f'\nsteps:{step}')
-        losses = torch.stack(losses) * torch.tensor(remain_ks, device=words.device)
+        losses = torch.stack(losses) * torch.tensor(remain_ks,
+                                                    device=words.device)
         loss = torch.sum(losses) / (len(losses) + 1)
         return loss, remain_ks
 
+    def dynamic_loss4(self, words, words_len, feats, edges, labels, p):
+        r"""
+        目前只适用dual
+        目前的优化目标只是Correct(c)中分数最高的
+        words: [batch_size, seq_len]
+        words_len: [batch_size]
+        edges : [batch_size, seq_len, seq_len]
+        labels: [batch_size, seq_len, seq_len]
+        与3不同的是：lesscorrect，计算correct集合的时候，去加了条件
+        batch化
+        """
+
+        batch_size, seq_len = words.shape
+        # get the mask and lengths of given batch
+        mask = words.ne(self.pad_index)
+        ext_words = words
+        # set the indices larger than num_embeddings to unk_index
+        if hasattr(self, 'pretrained'):
+            ext_mask = words.ge(self.word_embed.num_embeddings)
+            ext_words = words.masked_fill(ext_mask, self.unk_index)
+
+        # get outputs from embedding layers
+        word_embed = self.word_embed(ext_words)
+        if hasattr(self, 'pretrained'):
+            word_embed += self.pretrained(words)
+
+        feat_embeds = []
+        if 'tag' in self.args.feat:
+            feat_embeds.append(self.tag_embed(feats.pop()))
+        if 'char' in self.args.feat:
+            feat_embeds.append(self.char_embed(feats.pop(0)))
+        if 'bert' in self.args.feat:
+            feat_embeds.append(self.bert_embed(feats.pop(0)))
+        if 'lemma' in self.args.feat:
+            feat_embeds.append(self.lemma_embed(feats.pop(0)))
+        word_embed, feat_embed = self.embed_dropout(word_embed,
+                                                    torch.cat(feat_embeds, -1))
+        # concatenate the word and feat representations
+        embed = torch.cat((word_embed, feat_embed), -1)
+
+        x = pack_padded_sequence(embed, mask.sum(1), True, False)
+        x, _ = self.lstm(x)
+        x, _ = pad_packed_sequence(x, True, total_length=seq_len)
+        x = self.lstm_dropout(x)
+        # x:[batch_size, seq_len, hidden_size*2]
+        null_hidden = self.null_lstm_hidden.expand(batch_size, -1, -1)
+        x = torch.cat([x, null_hidden], dim=1)
+        # x:[batch_size, seq_len+1, hidden_size*2]
+        lstm_out_size = x.shape[2]
+
+        sdt = torch.tensor([[0] + [-1] *
+                            (seq_len - 1), [-1] * seq_len, [-1] * seq_len],
+                           dtype=torch.long,
+                           device=words.device)
+        # 这边先用-1pad，之后取的时候，要先fill，stack,buffer,deque用seq_len,pre_action用n_transitions
+        sdt = sdt.unsqueeze(0).expand(batch_size, -1, -1)
+        bu_lst = []
+        for length in words_len:
+            bu_lst.append(
+                torch.arange(1,
+                             length.item(),
+                             dtype=torch.long,
+                             device=words.device))
+        bu_out = pad(bu_lst, -1,
+                     seq_len).to(words.device).reshape(batch_size, 1, -1)
+        init_stat = torch.cat((sdt, bu_out), dim=1)
+        save_stat = init_stat[:, [0, 3, 2, 1]]
+        # 初始状态:[batch _size, 4, seq_len] stack,buffer,deque,pre_action
+        # pad with -1
+        # remain_edge = edges
+        # remain_label = labels
+        # remain_x = x
+        unfinish_mask = save_stat[:, 1, 0].gt(-1)
+
+        action_id = {
+            action_: [
+                self.transition_vocab.stoi[a]
+                for a in self.transition_vocab.stoi.keys()
+                if a.startswith(action_)
+            ]
+            for action_ in ["LR", "LP", "RS", "RP", "NS", "NR", "NP"]
+        }
+
+        losses = []
+        remain_ks = []
+        step = 0
+        while (unfinish_mask.sum()):
+            step += 1
+            remain_stat = save_stat[unfinish_mask]
+            # [k, 4, seq_len]
+            remain_edge = edges[unfinish_mask]
+            remain_label = labels[unfinish_mask]
+            # [k, seq_len, seq_len]
+            remain_x = x[unfinish_mask]
+            # [k, seq_len+1, lstm_out_size]
+            k = remain_stat.shape[0]
+            remain_ks.append(k / batch_size)
+
+            valid1 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            base_mask = valid1.gt(0)
+            valid1_mask = base_mask.clone()
+            stat_len = remain_stat.gt(-1).sum(dim=2)
+            # [k, 4]
+            valid_mask_sg1 = stat_len[:, 0].gt(1)
+            # [k]
+            valid_mask_bg0 = stat_len[:, 1].gt(0)
+            # [k]
+            valid_mask_sg0 = stat_len[:, 0].gt(0)
+            # [k]
+            mask_v1 = valid_mask_sg1 & valid_mask_bg0
+            mask_v1 = mask_v1.unsqueeze(1)
+            valid1_mask = valid1_mask & mask_v1
+            col_cond1 = torch.zeros(
+                len(self.transition_vocab), device=words.device).index_fill_(
+                    -1,
+                    torch.tensor(action_id['LR'] + action_id['LP'] +
+                                 action_id['RP'],
+                                 device=words.device), 1).gt(0)
+            valid1_mask = valid1_mask * col_cond1
+            valid1.masked_fill_(~valid1_mask, 0)
+
+            valid2 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            valid2_mask = base_mask.clone()
+
+            mask_v2 = valid_mask_bg0.unsqueeze(1)
+            valid2_mask = valid2_mask & mask_v2
+            col_cond2 = torch.zeros(len(self.transition_vocab),
+                                    device=words.device).index_fill_(
+                                        -1,
+                                        torch.tensor(action_id['NS'],
+                                                     device=words.device),
+                                        1).gt(0)
+            valid2_mask = valid2_mask * col_cond2
+            valid2.masked_fill_(~valid2_mask, 0)
+
+            valid3 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            valid3_mask = base_mask.clone()
+            mask_v3 = valid_mask_bg0 & valid_mask_sg0
+            mask_v3 = mask_v3.unsqueeze(1)
+            valid3_mask = valid3_mask & mask_v3
+            col_cond3 = torch.zeros(len(self.transition_vocab),
+                                    device=words.device).index_fill_(
+                                        -1,
+                                        torch.tensor(action_id['RS'],
+                                                     device=words.device),
+                                        1).gt(0)
+            valid3_mask = valid3_mask * col_cond3
+            valid3.masked_fill_(~valid3_mask, 0)
+
+            valid4 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            valid4_mask = base_mask.clone()
+            msak_v4 = valid_mask_sg1.unsqueeze(1)
+            valid4_mask = valid4_mask & msak_v4
+            col_cond4 = torch.zeros(len(self.transition_vocab),
+                                    device=words.device).index_fill_(
+                                        -1,
+                                        torch.tensor(
+                                            action_id['NR'] + action_id['NP'],
+                                            device=words.device), 1).gt(0)
+            valid4_mask = valid4_mask * col_cond4
+            valid4.masked_fill_(~valid4_mask, 0)
+            valid_actions = valid1 + valid2 + valid3 + valid4
+            # [k, 7]
+
+            # 求correct集合
+            correct_actions = torch.zeros((k, len(self.transition_vocab)),
+                                          dtype=torch.long,
+                                          device=words.device)
+            # [k, 7]
+            correct_labels = torch.ones(
+                (k, len(self.transition_vocab)),
+                dtype=torch.long,
+                device=words.device).masked_fill(base_mask, self.n_labels)
+            # 暂时correct labels存的还是一个，不是多个，对应less correct的版本
+
+            stack_isnot_clear = valid_mask_sg0.clone()
+            # [k]
+            stack_is_clear = (~stack_isnot_clear).unsqueeze(1)
+            ns_mask = base_mask & stack_is_clear
+            col_ns_mask = torch.zeros(len(self.transition_vocab),
+                                      device=words.device).index_fill_(
+                                          -1,
+                                          torch.tensor(action_id['NS'],
+                                                       device=words.device),
+                                          1).gt(0)
+            ns_mask = ns_mask * col_ns_mask
+            correct_actions = correct_actions.masked_fill(ns_mask, 1)
+            # correct_labels里面存的就是self.n_labels，所以不要动
+
+            # stack_isnot_clear_idx = (
+            #     stack_isnot_clear.int() == 1).nonzero().squeeze(1)
+            # [m] 保存的是k个里面stack非空的那些的下标
+            # if (stack_isnot_clear_idx.shape[0] > 0):
+            if (stack_isnot_clear.sum().item() > 0):
+                stack_exist_stat = remain_stat[stack_isnot_clear]
+                m = stack_exist_stat.shape[0]
+                # [m, 4, seq_len]
+                m_actions = torch.zeros((m, len(self.transition_vocab)),
+                                        dtype=torch.long,
+                                        device=words.device)
+                m_labels = torch.ones((m, len(self.transition_vocab)),
+                                      dtype=torch.long,
+                                      device=words.device)
+                m_base_mask = m_labels.gt(0)
+                m_labels = m_labels.masked_fill(m_base_mask, self.n_labels)
+
+                stack_exist_edge = remain_edge[stack_isnot_clear]
+                stack_exist_label = remain_label[stack_isnot_clear]
+                # [m, seq_len, seq_len]
+
+                exist_right = stack_exist_edge[:, stack_exist_stat[:, 1, 0],
+                                               stack_exist_stat[:, 0, 0]].diag(
+                                                   0).gt(0)
+                # [m] 有没有从i指向j的边（右边）
+                exist_left = stack_exist_edge[:, stack_exist_stat[:, 0, 0],
+                                              stack_exist_stat[:, 1, 0]].diag(
+                                                  0).gt(0)
+                # [m] 有没有从j指向i的边（左边）
+                left_label = stack_exist_label[:, stack_exist_stat[:, 0, 0],
+                                               stack_exist_stat[:, 1, 0]].diag(
+                                                   0).clone()
+                left_label = left_label.masked_fill(left_label.eq(-1),
+                                                    self.n_labels)
+                # [m] 所有左边的label
+                right_label = stack_exist_label[:, stack_exist_stat[:, 1, 0],
+                                                stack_exist_stat[:, 0,
+                                                                 0]].diag(
+                                                                     0).clone(
+                                                                     )
+                right_label = right_label.masked_fill(right_label.eq(-1),
+                                                      self.n_labels)
+                # [m] 所有的右边label
+
+                stack_head = stack_exist_stat[:, 0, 0].clone()
+                # [m]
+                sh1 = stack_head.unsqueeze(1).expand(-1, seq_len).unsqueeze(1)
+                # [m, 1, seq_len]
+                sh2 = stack_head.unsqueeze(1).expand(-1, seq_len - 1)
+                # [m, seq_len-1]
+                condicate_b = stack_exist_stat[:, 1, 1:].clone()
+                # [m, seq_len-1]
+                g1 = torch.gather(stack_exist_edge, 1, sh1)
+                # [m, 1, seq_len]
+                condicate_b_mask = condicate_b.eq(-1)
+                condicate_b_temp = condicate_b.masked_scatter(
+                    condicate_b_mask, sh2[condicate_b_mask]).unsqueeze(1)
+                # [m, 1, seq_len-1]
+                g2 = torch.gather(g1, 2, condicate_b_temp).squeeze(1)
+                # [m, seq_len-1]
+                if_i_beta = g2.sum(1).gt(0)
+                # [m]  有没有从beta指向i（栈顶）的边
+
+                sh1 = sh1.expand(-1, seq_len - 1, -1)
+                # [m, seq_len-1, seq_len]
+                m1 = condicate_b.unsqueeze(2).expand(-1, -1, seq_len)
+                # [m, seq_len-1, seq_len]
+                m1_mask = m1.eq(-1)
+                m1 = m1.masked_scatter(m1_mask, sh1[m1_mask])
+                m2 = torch.gather(stack_exist_edge, 1, m1)
+                # [m, seq_len-1, seq_len]
+                sh2 = stack_head.unsqueeze(1).unsqueeze(1).expand(
+                    -1, seq_len - 1, -1)
+                # [m, seq_len-1, 1]
+                m3 = torch.gather(m2, 2, sh2).squeeze(2)
+                # [m, seq_len-1]
+                if_beta_i = m3.sum(1).gt(0)
+                # [m] 有没有从i指向beta的边
+                or_beta_i = if_beta_i + if_i_beta
+                final_lr = (~exist_right) & (~or_beta_i) & exist_left
+                # [m]  不存在向右的边 and i与beta之间没有边 ,TODO: 加上要存在向左的边这个条件
+                final_lr_1 = final_lr.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                # [m, n_actions]
+                col_lr = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['LR'],
+                                                      device=words.device),
+                                         1).gt(0)
+                lr_mask = final_lr_1 * col_lr
+                # [m, n_actions]
+                # m_actions.masked_fill_(lr_mask, 1)
+                m_actions = m_actions.masked_fill(lr_mask, 1)
+                m_labels = m_labels.masked_scatter(lr_mask,
+                                                   left_label[final_lr])
+                # pdb.set_trace()
+
+                buffer_head = stack_exist_stat[:, 1, 0].clone()
+                sh1 = buffer_head.unsqueeze(1).expand(-1, seq_len).unsqueeze(1)
+                sh2 = buffer_head.unsqueeze(1).expand(-1, seq_len - 1)
+                condicate_s = stack_exist_stat[:, 0, 1:].clone()
+                g1 = torch.gather(stack_exist_edge, 1, sh1)
+                condicate_s_mask = condicate_s.eq(-1)
+                condicate_s_temp = condicate_s.masked_scatter(
+                    condicate_s_mask, sh2[condicate_s_mask]).unsqueeze(1)
+                g2 = torch.gather(g1, 2, condicate_s_temp).squeeze(1)
+                if_j_sigma = g2.sum(1).gt(0)
+                # [m] 有没有从sigma指向j的边
+
+                sh1 = sh1.expand(-1, seq_len - 1, -1)
+                m1 = condicate_s.unsqueeze(2).expand(-1, -1, seq_len)
+                m1_mask = m1.eq(-1)
+                m1 = m1.masked_scatter(m1_mask, sh1[m1_mask])
+                m2 = torch.gather(stack_exist_edge, 1, m1)
+                sh2 = buffer_head.unsqueeze(1).unsqueeze(1).expand(
+                    -1, seq_len - 1, -1)
+                m3 = torch.gather(m2, 2, sh2).squeeze(2)
+                if_sigma_j = m3.sum(1).gt(0)
+                # [m] 有没有从j指向sigma的边
+                or_sigma_j = if_j_sigma + if_sigma_j
+                final_rs = (~exist_left) & (~or_sigma_j) & exist_right
+                # [m] 不存在向左边的边 且 j与sigma之间没有边, TODO: 加上要存在向右的边这个条件
+                final_rs_1 = final_rs.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_rs = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['RS'],
+                                                      device=words.device),
+                                         1).gt(0)
+                rs_mask = final_rs_1 * col_rs
+                m_actions = m_actions.masked_fill(rs_mask, 1)
+                m_labels = m_labels.masked_scatter(rs_mask,
+                                                   right_label[final_rs])
+
+                if_stack_j = exist_left + if_sigma_j
+                # [m] 有没有从j指向stack的边
+                if_j_stack = exist_right + if_j_sigma
+                # [m] 有没有从stack指向j的边
+                or_stack_j = if_stack_j + if_j_stack
+                # [m] stack与j之间有没有边
+                final_ns = (~or_stack_j).unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_ns = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['NS'],
+                                                      device=words.device),
+                                         1).gt(0)
+                Ns_mask = final_ns * col_ns
+                m_actions = m_actions.masked_fill(Ns_mask, 1)
+                # 因为m_labels里面初始化为self.n_labels，所以不要动
+
+                if_buffer_i = exist_right + if_beta_i
+                # 有没有从i指向buffer的边
+                if_i_buffer = exist_left + if_i_beta
+                # 有没有从buffer指向i的边
+                or_buffer_i = if_buffer_i + if_i_buffer
+                final_nr = (~or_buffer_i).unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_nr = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['NR'],
+                                                      device=words.device),
+                                         1).gt(0)
+                nr_mask = final_nr * col_nr
+                m_actions = m_actions.masked_fill(nr_mask, 1)
+
+                final_lp = (~exist_right) & exist_left  # TODO: 加上要存在向左的边这个条件
+                final_lp_1 = final_lp.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_lp = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['LP'],
+                                                      device=words.device),
+                                         1).gt(0)
+                lp_mask = final_lp_1 * col_lp
+                m_actions = m_actions.masked_fill(lp_mask, 1)
+                m_labels = m_labels.masked_scatter(lp_mask,
+                                                   left_label[final_lp])
+
+                final_rp = (~exist_left) & exist_right  # TODO: 加上要存在向右的边这个条件
+                final_rp_1 = final_rp.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_rp = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['RP'],
+                                                      device=words.device),
+                                         1).gt(0)
+
+                rp_mask = final_rp_1 * col_rp
+                m_actions = m_actions.masked_fill(rp_mask, 1)
+                m_labels = m_labels.masked_scatter(rp_mask,
+                                                   right_label[final_rp])
+
+                exist_arc = exist_left + exist_right
+                final_np = (~exist_arc).unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_np = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['NP'],
+                                                      device=words.device),
+                                         1).gt(0)
+                np_mask = final_np * col_np
+                m_actions = m_actions.masked_fill(np_mask, 1)
+
+                # 至此m_actions,m_labels填充完毕 [m, len(self.n_transition)]
+                # example: m_actions[0]: [0, 0, 1, 1, 0, 1, 0]
+                #          m_labels[0] : [self.n_labes, self.n_labes, 4, 2, self.n_labes, 21, self.n_labes]
+
+                back_mask = stack_isnot_clear.unsqueeze(1).expand(
+                    -1, self.n_transitions)
+                correct_actions = correct_actions.masked_scatter(
+                    back_mask, m_actions)
+                correct_labels = correct_labels.masked_scatter(
+                    back_mask, m_labels)
+                # 把stack非空的填回去了
+
+            # 对valid和correct求交集
+            valid_mask = valid_actions.gt(0)
+            correct_mask = correct_actions.gt(0)
+            intersect_mask = valid_mask & correct_mask
+            correct_actions = intersect_mask.long()
+            correct_mask = correct_actions.gt(0)
+
+            new_correct_labels = torch.tensor(
+                [self.n_labels] * self.n_transitions,
+                dtype=torch.long,
+                device=words.device).unsqueeze(0).expand(k, -1)
+            new_correct_labels = new_correct_labels.masked_scatter(
+                intersect_mask, correct_labels[intersect_mask])
+
+            windowed = remain_stat[..., :1].clone()
+            # pdb.set_trace()
+            # [k, 4, 1]
+            win_states = windowed[:, 0:3, :]
+            null_lstm_mask = win_states.eq(-1)
+            win_states = win_states.masked_fill(null_lstm_mask, seq_len)
+            # [k, 3, 1]
+            s1, s2, s3 = win_states.shape
+            win_states = win_states.reshape(s1, s2 * s3).unsqueeze(-1).expand(
+                -1, -1, lstm_out_size)
+            states_hidden = torch.gather(remain_x, 1,
+                                         win_states).reshape(s1, s2, s3, -1)
+            # [k, 3, 1, lstm_out_size]
+            states_hidden = states_hidden.squeeze(2).reshape(k, -1)
+            # [k, 3*lstm_out_size]
+
+            transitions = windowed[:, 3, :]
+            # [k, 1, 1]
+            transitions_mask = transitions.eq(-1)
+            transitions = transitions.masked_fill(transitions_mask,
+                                                  self.n_transitions)
+            transitions = transitions.reshape(k, -1)
+            # [k, 1]
+            # transitions_embed = self.new_droupout(
+            #     self.transition_embed(transitions)).reshape(k, -1)
+
+            transitions_embed = self.transition_embed_droupout(
+                self.transition_embed(transitions))[0].reshape(k, -1)
+
+            # [k, n_transition_embed]
+            final_repr = torch.cat((transitions_embed, states_hidden), -1)
+            # [k, n_transition_embed+3*lstm_out_size]
+
+            action_score = self.action_mlp(final_repr)
+            # [k, n_transitions]
+
+            # pdb.set_trace()
+            new_v = torch.tensor([-float('inf')] * 7,
+                                 device=words.device).unsqueeze(0).expand(
+                                     k, -1)
+            new_v = new_v.masked_scatter(valid_mask, action_score[valid_mask])
+            pred_action = torch.argmax(new_v, dim=1)
+            # [k] 存放的是预测的action的下标,由于pred_label并不会对state造成啥影响，所以暂时就没算
+            new_c = torch.tensor([-float('inf')] * 7,
+                                 device=words.device).unsqueeze(0).expand(
+                                     k, -1)
+            new_c = new_c.masked_scatter(correct_mask,
+                                         action_score[correct_mask])
+            o_action = torch.argmax(new_c, dim=1)
+            # [k] 存放的是oracle action的下标
+            o_label = torch.gather(new_correct_labels, 1,
+                                   o_action.unsqueeze(1)).squeeze(1)
+            # [k] 存放的是oracle label
+
+            # 计算这一步的loss
+            step_action_loss = self.criterion(action_score, o_action)
+            # step_action_loss = self.criterion(action_score, pred_action)  # 让优化目标就是自己
+            this_step_action_embed = self.transition_embed(pred_action)
+            # [k, n_transition_embed]
+            label_final_repr = torch.cat((final_repr, this_step_action_embed),
+                                         -1)
+            label_score = self.label_mlp(label_final_repr)
+
+            pred_label = torch.argmax(label_score, dim=1)
+            # step_label_loss = self.criterion(label_score, pred_label)  # 让优化目标就是自己
+            step_label_loss = self.criterion(label_score, o_label)
+            step_loss = step_action_loss + step_label_loss
+            # 已经对batch求了平均
+            losses.append(step_loss)
+            # 现在这边是把每一步的loss求和后平均再反向传播，如果这造成现存爆炸，可以一步之后就backward（还是一个batch再update）
+
+            pro = torch.rand(k, device=words.device)
+            # [k] 对应k个状态follow pred的概率,小于p则follow pred的，大于则follow o_action
+            follow_pred = pro.lt(p)
+            followed_action = pred_action.masked_scatter(
+                ~follow_pred, o_action[~follow_pred])
+            # [k] k个state真正要执行的action的下标
+
+            # 之后就是要对这k个state去进行操作了
+            # TODO: 这种写法不好，要确保只是只包含一个
+            Reduce_mask = followed_action.eq(
+                action_id['LR'][0]) + followed_action.eq(action_id['NR'][0])
+            Pass_mask = followed_action.eq(
+                action_id['LP'][0]) + followed_action.eq(
+                    action_id['NP'][0]) + followed_action.eq(
+                        action_id['RP'][0])
+            Shift_mask = followed_action.eq(
+                action_id['RS'][0]) + followed_action.eq(action_id['NS'][0])
+            # [k]
+
+            with torch.no_grad():
+                require_reduce = remain_stat[Reduce_mask]
+                require_reduce[:, 0, :-1] = require_reduce[:, 0, 1:].clone()
+                require_reduce[:, 0, -1] = -1
+                reduce_action_mask = ~require_reduce.ge(-1)
+                reduce_action_mask[:, 3, 0] = True
+                require_reduce = require_reduce.masked_scatter(
+                    reduce_action_mask, followed_action[Reduce_mask])
+                back_reduce_mask = Reduce_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_reduce_mask, require_reduce)
+
+                require_pass = remain_stat[Pass_mask]
+                require_pass[:, 2, 1:] = require_pass[:, 2, :-1].clone()
+                require_pass[:, 2, 0] = require_pass[:, 0, 0]
+                require_pass[:, 0, :-1] = require_pass[:, 0, 1:].clone()
+                require_pass[:, 0, -1] = -1
+                pass_action_mask = ~require_pass.ge(-1)
+                pass_action_mask[:, 3, 0] = True
+                require_pass = require_pass.masked_scatter(
+                    pass_action_mask, followed_action[Pass_mask])
+                back_pass_mask = Pass_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_pass_mask, require_pass)
+
+                require_shift = remain_stat[Shift_mask]
+                buffer_top = require_shift[:, 1, 0].unsqueeze(1)
+                reverse_deque = torch.flip(require_shift[:, 2], [1])
+                b_rd = torch.cat((buffer_top, reverse_deque), -1)
+                b_rd_mask = b_rd.gt(-1)
+                cat_stack = require_shift[:, 0]
+                cat_mask = cat_stack.ge(-1)
+                b_rd_s = torch.cat((b_rd, cat_stack), -1)
+                f_mask = torch.cat((b_rd_mask, cat_mask), -1)
+                stack_mask = ~require_shift.ge(-1)
+                stack_mask[:, 0] = True
+                require_shift = require_shift.masked_scatter(
+                    stack_mask, b_rd_s[f_mask.cumsum(1).le(seq_len) & f_mask])
+                require_shift[:, 1, :-1] = require_shift[:, 1, 1:].clone()
+                require_shift[:, 1, -1] = -1
+                require_shift[:, 2] = -1
+                shift_action_mask = ~require_shift.ge(-1)
+                shift_action_mask[:, 3, 0] = True
+                require_shift = require_shift.masked_scatter(
+                    shift_action_mask, followed_action[Shift_mask])
+                back_shift_mask = Shift_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_shift_mask, require_shift)
+
+            # 到此remain_stat修改完毕,接下来把状态写回save_stat
+            state_back_mask = unfinish_mask.unsqueeze(1).expand(
+                -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+            save_stat = save_stat.masked_scatter(state_back_mask, remain_stat)
+            unfinish_mask = save_stat[:, 1, 0].gt(-1)
+            # [batch_size]
+
+        # losses中存储了每一步的loss
+        # loss = torch.sum(torch.stack(losses)) / (len(losses) + 1)
+        # print(f'\nsteps:{step}')
+        losses = torch.stack(losses) * torch.tensor(remain_ks,
+                                                    device=words.device)
+        loss = torch.sum(losses) / (len(losses) + 1)
+        return loss, remain_ks
+
+    
+    def dynamic_loss5(self, words, words_len, feats, edges, labels, p):
+        r"""
+        目前只适用dual
+        目前的优化目标只是Correct(c)中分数最高的
+        words: [batch_size, seq_len]
+        words_len: [batch_size]
+        edges : [batch_size, seq_len, seq_len]
+        labels: [batch_size, seq_len, seq_len]
+        与4不同的是：loss函数支持多标签分类
+        batch化
+        """
+
+        batch_size, seq_len = words.shape
+        # get the mask and lengths of given batch
+        mask = words.ne(self.pad_index)
+        ext_words = words
+        # set the indices larger than num_embeddings to unk_index
+        if hasattr(self, 'pretrained'):
+            ext_mask = words.ge(self.word_embed.num_embeddings)
+            ext_words = words.masked_fill(ext_mask, self.unk_index)
+
+        # get outputs from embedding layers
+        word_embed = self.word_embed(ext_words)
+        if hasattr(self, 'pretrained'):
+            word_embed += self.pretrained(words)
+
+        feat_embeds = []
+        if 'tag' in self.args.feat:
+            feat_embeds.append(self.tag_embed(feats.pop()))
+        if 'char' in self.args.feat:
+            feat_embeds.append(self.char_embed(feats.pop(0)))
+        if 'bert' in self.args.feat:
+            feat_embeds.append(self.bert_embed(feats.pop(0)))
+        if 'lemma' in self.args.feat:
+            feat_embeds.append(self.lemma_embed(feats.pop(0)))
+        word_embed, feat_embed = self.embed_dropout(word_embed,
+                                                    torch.cat(feat_embeds, -1))
+        # concatenate the word and feat representations
+        embed = torch.cat((word_embed, feat_embed), -1)
+
+        x = pack_padded_sequence(embed, mask.sum(1), True, False)
+        x, _ = self.lstm(x)
+        x, _ = pad_packed_sequence(x, True, total_length=seq_len)
+        x = self.lstm_dropout(x)
+        # x:[batch_size, seq_len, hidden_size*2]
+        null_hidden = self.null_lstm_hidden.expand(batch_size, -1, -1)
+        x = torch.cat([x, null_hidden], dim=1)
+        # x:[batch_size, seq_len+1, hidden_size*2]
+        lstm_out_size = x.shape[2]
+
+        sdt = torch.tensor([[0] + [-1] *
+                            (seq_len - 1), [-1] * seq_len, [-1] * seq_len],
+                           dtype=torch.long,
+                           device=words.device)
+        # 这边先用-1pad，之后取的时候，要先fill，stack,buffer,deque用seq_len,pre_action用n_transitions
+        sdt = sdt.unsqueeze(0).expand(batch_size, -1, -1)
+        bu_lst = []
+        for length in words_len:
+            bu_lst.append(
+                torch.arange(1,
+                             length.item(),
+                             dtype=torch.long,
+                             device=words.device))
+        bu_out = pad(bu_lst, -1,
+                     seq_len).to(words.device).reshape(batch_size, 1, -1)
+        init_stat = torch.cat((sdt, bu_out), dim=1)
+        save_stat = init_stat[:, [0, 3, 2, 1]]
+        # 初始状态:[batch _size, 4, seq_len] stack,buffer,deque,pre_action
+        # pad with -1
+        # remain_edge = edges
+        # remain_label = labels
+        # remain_x = x
+        unfinish_mask = save_stat[:, 1, 0].gt(-1)
+
+        action_id = {
+            action_: [
+                self.transition_vocab.stoi[a]
+                for a in self.transition_vocab.stoi.keys()
+                if a.startswith(action_)
+            ]
+            for action_ in ["LR", "LP", "RS", "RP", "NS", "NR", "NP"]
+        }
+
+        losses = []
+        remain_ks = []
+        step = 0
+        while (unfinish_mask.sum()):
+            step += 1
+            remain_stat = save_stat[unfinish_mask]
+            # [k, 4, seq_len]
+            remain_edge = edges[unfinish_mask]
+            remain_label = labels[unfinish_mask]
+            # [k, seq_len, seq_len]
+            remain_x = x[unfinish_mask]
+            # [k, seq_len+1, lstm_out_size]
+            k = remain_stat.shape[0]
+            remain_ks.append(k / batch_size)
+
+            valid1 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            base_mask = valid1.gt(0)
+            valid1_mask = base_mask.clone()
+            stat_len = remain_stat.gt(-1).sum(dim=2)
+            # [k, 4]
+            valid_mask_sg1 = stat_len[:, 0].gt(1)
+            # [k]
+            valid_mask_bg0 = stat_len[:, 1].gt(0)
+            # [k]
+            valid_mask_sg0 = stat_len[:, 0].gt(0)
+            # [k]
+            mask_v1 = valid_mask_sg1 & valid_mask_bg0
+            mask_v1 = mask_v1.unsqueeze(1)
+            valid1_mask = valid1_mask & mask_v1
+            col_cond1 = torch.zeros(
+                len(self.transition_vocab), device=words.device).index_fill_(
+                    -1,
+                    torch.tensor(action_id['LR'] + action_id['LP'] +
+                                 action_id['RP'],
+                                 device=words.device), 1).gt(0)
+            valid1_mask = valid1_mask * col_cond1
+            valid1.masked_fill_(~valid1_mask, 0)
+
+            valid2 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            valid2_mask = base_mask.clone()
+
+            mask_v2 = valid_mask_bg0.unsqueeze(1)
+            valid2_mask = valid2_mask & mask_v2
+            col_cond2 = torch.zeros(len(self.transition_vocab),
+                                    device=words.device).index_fill_(
+                                        -1,
+                                        torch.tensor(action_id['NS'],
+                                                     device=words.device),
+                                        1).gt(0)
+            valid2_mask = valid2_mask * col_cond2
+            valid2.masked_fill_(~valid2_mask, 0)
+
+            valid3 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            valid3_mask = base_mask.clone()
+            mask_v3 = valid_mask_bg0 & valid_mask_sg0
+            mask_v3 = mask_v3.unsqueeze(1)
+            valid3_mask = valid3_mask & mask_v3
+            col_cond3 = torch.zeros(len(self.transition_vocab),
+                                    device=words.device).index_fill_(
+                                        -1,
+                                        torch.tensor(action_id['RS'],
+                                                     device=words.device),
+                                        1).gt(0)
+            valid3_mask = valid3_mask * col_cond3
+            valid3.masked_fill_(~valid3_mask, 0)
+
+            valid4 = torch.ones((k, len(self.transition_vocab)),
+                                dtype=torch.long,
+                                device=words.device)
+            valid4_mask = base_mask.clone()
+            msak_v4 = valid_mask_sg1.unsqueeze(1)
+            valid4_mask = valid4_mask & msak_v4
+            col_cond4 = torch.zeros(len(self.transition_vocab),
+                                    device=words.device).index_fill_(
+                                        -1,
+                                        torch.tensor(
+                                            action_id['NR'] + action_id['NP'],
+                                            device=words.device), 1).gt(0)
+            valid4_mask = valid4_mask * col_cond4
+            valid4.masked_fill_(~valid4_mask, 0)
+            valid_actions = valid1 + valid2 + valid3 + valid4
+            # [k, 7]
+
+            # 求correct集合
+            correct_actions = torch.zeros((k, len(self.transition_vocab)),
+                                          dtype=torch.long,
+                                          device=words.device)
+            # [k, 7]
+            correct_labels = torch.ones(
+                (k, len(self.transition_vocab)),
+                dtype=torch.long,
+                device=words.device).masked_fill(base_mask, self.n_labels)
+            # 暂时correct labels存的还是一个，不是多个，对应less correct的版本
+
+            stack_isnot_clear = valid_mask_sg0.clone()
+            # [k]
+            stack_is_clear = (~stack_isnot_clear).unsqueeze(1)
+            ns_mask = base_mask & stack_is_clear
+            col_ns_mask = torch.zeros(len(self.transition_vocab),
+                                      device=words.device).index_fill_(
+                                          -1,
+                                          torch.tensor(action_id['NS'],
+                                                       device=words.device),
+                                          1).gt(0)
+            ns_mask = ns_mask * col_ns_mask
+            correct_actions = correct_actions.masked_fill(ns_mask, 1)
+            # correct_labels里面存的就是self.n_labels，所以不要动
+
+            # stack_isnot_clear_idx = (
+            #     stack_isnot_clear.int() == 1).nonzero().squeeze(1)
+            # [m] 保存的是k个里面stack非空的那些的下标
+            # if (stack_isnot_clear_idx.shape[0] > 0):
+            if (stack_isnot_clear.sum().item() > 0):
+                stack_exist_stat = remain_stat[stack_isnot_clear]
+                m = stack_exist_stat.shape[0]
+                # [m, 4, seq_len]
+                m_actions = torch.zeros((m, len(self.transition_vocab)),
+                                        dtype=torch.long,
+                                        device=words.device)
+                m_labels = torch.ones((m, len(self.transition_vocab)),
+                                      dtype=torch.long,
+                                      device=words.device)
+                m_base_mask = m_labels.gt(0)
+                m_labels = m_labels.masked_fill(m_base_mask, self.n_labels)
+
+                stack_exist_edge = remain_edge[stack_isnot_clear]
+                stack_exist_label = remain_label[stack_isnot_clear]
+                # [m, seq_len, seq_len]
+
+                exist_right = stack_exist_edge[:, stack_exist_stat[:, 1, 0],
+                                               stack_exist_stat[:, 0, 0]].diag(
+                                                   0).gt(0)
+                # [m] 有没有从i指向j的边（右边）
+                exist_left = stack_exist_edge[:, stack_exist_stat[:, 0, 0],
+                                              stack_exist_stat[:, 1, 0]].diag(
+                                                  0).gt(0)
+                # [m] 有没有从j指向i的边（左边）
+                left_label = stack_exist_label[:, stack_exist_stat[:, 0, 0],
+                                               stack_exist_stat[:, 1, 0]].diag(
+                                                   0).clone()
+                left_label = left_label.masked_fill(left_label.eq(-1),
+                                                    self.n_labels)
+                # [m] 所有左边的label
+                right_label = stack_exist_label[:, stack_exist_stat[:, 1, 0],
+                                                stack_exist_stat[:, 0,
+                                                                 0]].diag(
+                                                                     0).clone(
+                                                                     )
+                right_label = right_label.masked_fill(right_label.eq(-1),
+                                                      self.n_labels)
+                # [m] 所有的右边label
+
+                stack_head = stack_exist_stat[:, 0, 0].clone()
+                # [m]
+                sh1 = stack_head.unsqueeze(1).expand(-1, seq_len).unsqueeze(1)
+                # [m, 1, seq_len]
+                sh2 = stack_head.unsqueeze(1).expand(-1, seq_len - 1)
+                # [m, seq_len-1]
+                condicate_b = stack_exist_stat[:, 1, 1:].clone()
+                # [m, seq_len-1]
+                g1 = torch.gather(stack_exist_edge, 1, sh1)
+                # [m, 1, seq_len]
+                condicate_b_mask = condicate_b.eq(-1)
+                condicate_b_temp = condicate_b.masked_scatter(
+                    condicate_b_mask, sh2[condicate_b_mask]).unsqueeze(1)
+                # [m, 1, seq_len-1]
+                g2 = torch.gather(g1, 2, condicate_b_temp).squeeze(1)
+                # [m, seq_len-1]
+                if_i_beta = g2.sum(1).gt(0)
+                # [m]  有没有从beta指向i（栈顶）的边
+
+                sh1 = sh1.expand(-1, seq_len - 1, -1)
+                # [m, seq_len-1, seq_len]
+                m1 = condicate_b.unsqueeze(2).expand(-1, -1, seq_len)
+                # [m, seq_len-1, seq_len]
+                m1_mask = m1.eq(-1)
+                m1 = m1.masked_scatter(m1_mask, sh1[m1_mask])
+                m2 = torch.gather(stack_exist_edge, 1, m1)
+                # [m, seq_len-1, seq_len]
+                sh2 = stack_head.unsqueeze(1).unsqueeze(1).expand(
+                    -1, seq_len - 1, -1)
+                # [m, seq_len-1, 1]
+                m3 = torch.gather(m2, 2, sh2).squeeze(2)
+                # [m, seq_len-1]
+                if_beta_i = m3.sum(1).gt(0)
+                # [m] 有没有从i指向beta的边
+                or_beta_i = if_beta_i + if_i_beta
+                final_lr = (~exist_right) & (~or_beta_i) & exist_left
+                # [m]  不存在向右的边 and i与beta之间没有边 ,TODO: 加上要存在向左的边这个条件
+                final_lr_1 = final_lr.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                # [m, n_actions]
+                col_lr = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['LR'],
+                                                      device=words.device),
+                                         1).gt(0)
+                lr_mask = final_lr_1 * col_lr
+                # [m, n_actions]
+                # m_actions.masked_fill_(lr_mask, 1)
+                m_actions = m_actions.masked_fill(lr_mask, 1)
+                m_labels = m_labels.masked_scatter(lr_mask,
+                                                   left_label[final_lr])
+                # pdb.set_trace()
+
+                buffer_head = stack_exist_stat[:, 1, 0].clone()
+                sh1 = buffer_head.unsqueeze(1).expand(-1, seq_len).unsqueeze(1)
+                sh2 = buffer_head.unsqueeze(1).expand(-1, seq_len - 1)
+                condicate_s = stack_exist_stat[:, 0, 1:].clone()
+                g1 = torch.gather(stack_exist_edge, 1, sh1)
+                condicate_s_mask = condicate_s.eq(-1)
+                condicate_s_temp = condicate_s.masked_scatter(
+                    condicate_s_mask, sh2[condicate_s_mask]).unsqueeze(1)
+                g2 = torch.gather(g1, 2, condicate_s_temp).squeeze(1)
+                if_j_sigma = g2.sum(1).gt(0)
+                # [m] 有没有从sigma指向j的边
+
+                sh1 = sh1.expand(-1, seq_len - 1, -1)
+                m1 = condicate_s.unsqueeze(2).expand(-1, -1, seq_len)
+                m1_mask = m1.eq(-1)
+                m1 = m1.masked_scatter(m1_mask, sh1[m1_mask])
+                m2 = torch.gather(stack_exist_edge, 1, m1)
+                sh2 = buffer_head.unsqueeze(1).unsqueeze(1).expand(
+                    -1, seq_len - 1, -1)
+                m3 = torch.gather(m2, 2, sh2).squeeze(2)
+                if_sigma_j = m3.sum(1).gt(0)
+                # [m] 有没有从j指向sigma的边
+                or_sigma_j = if_j_sigma + if_sigma_j
+                final_rs = (~exist_left) & (~or_sigma_j) & exist_right
+                # [m] 不存在向左边的边 且 j与sigma之间没有边, TODO: 加上要存在向右的边这个条件
+                final_rs_1 = final_rs.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_rs = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['RS'],
+                                                      device=words.device),
+                                         1).gt(0)
+                rs_mask = final_rs_1 * col_rs
+                m_actions = m_actions.masked_fill(rs_mask, 1)
+                m_labels = m_labels.masked_scatter(rs_mask,
+                                                   right_label[final_rs])
+
+                if_stack_j = exist_left + if_sigma_j
+                # [m] 有没有从j指向stack的边
+                if_j_stack = exist_right + if_j_sigma
+                # [m] 有没有从stack指向j的边
+                or_stack_j = if_stack_j + if_j_stack
+                # [m] stack与j之间有没有边
+                final_ns = (~or_stack_j).unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_ns = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['NS'],
+                                                      device=words.device),
+                                         1).gt(0)
+                Ns_mask = final_ns * col_ns
+                m_actions = m_actions.masked_fill(Ns_mask, 1)
+                # 因为m_labels里面初始化为self.n_labels，所以不要动
+
+                if_buffer_i = exist_right + if_beta_i
+                # 有没有从i指向buffer的边
+                if_i_buffer = exist_left + if_i_beta
+                # 有没有从buffer指向i的边
+                or_buffer_i = if_buffer_i + if_i_buffer
+                final_nr = (~or_buffer_i).unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_nr = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['NR'],
+                                                      device=words.device),
+                                         1).gt(0)
+                nr_mask = final_nr * col_nr
+                m_actions = m_actions.masked_fill(nr_mask, 1)
+
+                final_lp = (~exist_right) & exist_left  # TODO: 加上要存在向左的边这个条件
+                final_lp_1 = final_lp.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_lp = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['LP'],
+                                                      device=words.device),
+                                         1).gt(0)
+                lp_mask = final_lp_1 * col_lp
+                m_actions = m_actions.masked_fill(lp_mask, 1)
+                m_labels = m_labels.masked_scatter(lp_mask,
+                                                   left_label[final_lp])
+
+                final_rp = (~exist_left) & exist_right  # TODO: 加上要存在向右的边这个条件
+                final_rp_1 = final_rp.unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_rp = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['RP'],
+                                                      device=words.device),
+                                         1).gt(0)
+
+                rp_mask = final_rp_1 * col_rp
+                m_actions = m_actions.masked_fill(rp_mask, 1)
+                m_labels = m_labels.masked_scatter(rp_mask,
+                                                   right_label[final_rp])
+
+                exist_arc = exist_left + exist_right
+                final_np = (~exist_arc).unsqueeze(1).expand(
+                    -1, len(self.transition_vocab))
+                col_np = torch.zeros(len(self.transition_vocab),
+                                     device=words.device).index_fill_(
+                                         -1,
+                                         torch.tensor(action_id['NP'],
+                                                      device=words.device),
+                                         1).gt(0)
+                np_mask = final_np * col_np
+                m_actions = m_actions.masked_fill(np_mask, 1)
+
+                # 至此m_actions,m_labels填充完毕 [m, len(self.n_transition)]
+                # example: m_actions[0]: [0, 0, 1, 1, 0, 1, 0]
+                #          m_labels[0] : [self.n_labes, self.n_labes, 4, 2, self.n_labes, 21, self.n_labes]
+
+                back_mask = stack_isnot_clear.unsqueeze(1).expand(
+                    -1, self.n_transitions)
+                correct_actions = correct_actions.masked_scatter(
+                    back_mask, m_actions)
+                correct_labels = correct_labels.masked_scatter(
+                    back_mask, m_labels)
+                # 把stack非空的填回去了
+
+            # 对valid和correct求交集
+            valid_mask = valid_actions.gt(0)
+            correct_mask = correct_actions.gt(0)
+            intersect_mask = valid_mask & correct_mask
+            correct_actions = intersect_mask.long()
+            correct_mask = correct_actions.gt(0)
+
+            new_correct_labels = torch.tensor(
+                [self.n_labels] * self.n_transitions,
+                dtype=torch.long,
+                device=words.device).unsqueeze(0).expand(k, -1)
+            new_correct_labels = new_correct_labels.masked_scatter(
+                intersect_mask, correct_labels[intersect_mask])
+
+            windowed = remain_stat[..., :1].clone()
+            # pdb.set_trace()
+            # [k, 4, 1]
+            win_states = windowed[:, 0:3, :]
+            null_lstm_mask = win_states.eq(-1)
+            win_states = win_states.masked_fill(null_lstm_mask, seq_len)
+            # [k, 3, 1]
+            s1, s2, s3 = win_states.shape
+            win_states = win_states.reshape(s1, s2 * s3).unsqueeze(-1).expand(
+                -1, -1, lstm_out_size)
+            states_hidden = torch.gather(remain_x, 1,
+                                         win_states).reshape(s1, s2, s3, -1)
+            # [k, 3, 1, lstm_out_size]
+            states_hidden = states_hidden.squeeze(2).reshape(k, -1)
+            # [k, 3*lstm_out_size]
+
+            transitions = windowed[:, 3, :]
+            # [k, 1, 1]
+            transitions_mask = transitions.eq(-1)
+            transitions = transitions.masked_fill(transitions_mask,
+                                                  self.n_transitions)
+            transitions = transitions.reshape(k, -1)
+            # [k, 1]
+            # transitions_embed = self.new_droupout(
+            #     self.transition_embed(transitions)).reshape(k, -1)
+
+            transitions_embed = self.transition_embed_droupout(
+                self.transition_embed(transitions))[0].reshape(k, -1)
+
+            # [k, n_transition_embed]
+            final_repr = torch.cat((transitions_embed, states_hidden), -1)
+            # [k, n_transition_embed+3*lstm_out_size]
+
+            action_score = self.action_mlp(final_repr)
+            # [k, n_transitions]
+
+            # pdb.set_trace()
+            new_v = torch.tensor([-float('inf')] * 7,
+                                 device=words.device).unsqueeze(0).expand(
+                                     k, -1)
+            new_v = new_v.masked_scatter(valid_mask, action_score[valid_mask])
+            pred_action = torch.argmax(new_v, dim=1)
+            # [k] 存放的是预测的action的下标,由于pred_label并不会对state造成啥影响，所以暂时就没算
+            
+            new_c = torch.tensor([-float('inf')] * 7,
+                                    device=words.device).unsqueeze(0).expand(
+                                        k, -1)
+            new_c = new_c.masked_scatter(correct_mask,
+                                        action_score[correct_mask])
+            o_action = torch.argmax(new_c, dim=1)
+            # [k] 存放的是oracle action的下标，分数最高的
+
+            if(self.loss_type == 'Formal'):
+                o_label = torch.gather(new_correct_labels, 1,
+                                    o_action.unsqueeze(1)).squeeze(1)
+                # [k] 存放的是oracle label
+
+                # 计算这一步的loss
+                step_action_loss = self.do_criterion(action_score, o_action)
+                # step_action_loss = self.criterion(action_score, pred_action)  # 让优化目标就是自己
+                this_step_action_embed = self.transition_embed(pred_action)
+                # [k, n_transition_embed]
+                label_final_repr = torch.cat((final_repr, this_step_action_embed),
+                                            -1)
+                label_score = self.label_mlp(label_final_repr)
+
+                # pred_label = torch.argmax(label_score, dim=1)
+                # step_label_loss = self.criterion(label_score, pred_label)  # 让优化目标就是自己
+                step_label_loss = self.do_criterion(label_score, o_label)
+                step_loss = step_action_loss + step_label_loss
+                # 已经对batch求了平均
+                losses.append(step_loss)
+                # 现在这边是把每一步的loss求和后平均再反向传播，如果这造成现存爆炸，可以一步之后就backward（还是一个batch再update）
+
+            elif(self.loss_type == 'MLL'):
+                step_action_loss = self.do_criterion(action_score, correct_actions)
+                v_x = correct_mask.nonzero()[:,0]
+                v_y = new_correct_labels[correct_mask]
+                label_target = torch.zeros((k, self.n_labels+1), dtype=torch.long, device=words.device)
+                label_target[v_x, v_y] = 1
+
+                this_step_action_embed = self.transition_embed(pred_action)
+                # [k, n_transition_embed]
+                label_final_repr = torch.cat((final_repr, this_step_action_embed),
+                                            -1)
+                label_score = self.label_mlp(label_final_repr)
+                step_label_loss = self.do_criterion(label_score, label_target)
+                step_loss = step_action_loss + step_label_loss
+                # 已经对batch求了平均
+                losses.append(step_loss)
+
+            pro = torch.rand(k, device=words.device)
+            # [k] 对应k个状态follow pred的概率,小于p则follow pred的，大于则follow o_action
+            follow_pred = pro.lt(p)
+            followed_action = pred_action.masked_scatter(
+                ~follow_pred, o_action[~follow_pred])
+            # [k] k个state真正要执行的action的下标
+
+            # 之后就是要对这k个state去进行操作了
+            # TODO: 这种写法不好，要确保只是只包含一个
+            Reduce_mask = followed_action.eq(
+                action_id['LR'][0]) + followed_action.eq(action_id['NR'][0])
+            Pass_mask = followed_action.eq(
+                action_id['LP'][0]) + followed_action.eq(
+                    action_id['NP'][0]) + followed_action.eq(
+                        action_id['RP'][0])
+            Shift_mask = followed_action.eq(
+                action_id['RS'][0]) + followed_action.eq(action_id['NS'][0])
+            # [k]
+
+            with torch.no_grad():
+                require_reduce = remain_stat[Reduce_mask]
+                require_reduce[:, 0, :-1] = require_reduce[:, 0, 1:].clone()
+                require_reduce[:, 0, -1] = -1
+                reduce_action_mask = ~require_reduce.ge(-1)
+                reduce_action_mask[:, 3, 0] = True
+                require_reduce = require_reduce.masked_scatter(
+                    reduce_action_mask, followed_action[Reduce_mask])
+                back_reduce_mask = Reduce_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_reduce_mask, require_reduce)
+
+                require_pass = remain_stat[Pass_mask]
+                require_pass[:, 2, 1:] = require_pass[:, 2, :-1].clone()
+                require_pass[:, 2, 0] = require_pass[:, 0, 0]
+                require_pass[:, 0, :-1] = require_pass[:, 0, 1:].clone()
+                require_pass[:, 0, -1] = -1
+                pass_action_mask = ~require_pass.ge(-1)
+                pass_action_mask[:, 3, 0] = True
+                require_pass = require_pass.masked_scatter(
+                    pass_action_mask, followed_action[Pass_mask])
+                back_pass_mask = Pass_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_pass_mask, require_pass)
+
+                require_shift = remain_stat[Shift_mask]
+                buffer_top = require_shift[:, 1, 0].unsqueeze(1)
+                reverse_deque = torch.flip(require_shift[:, 2], [1])
+                b_rd = torch.cat((buffer_top, reverse_deque), -1)
+                b_rd_mask = b_rd.gt(-1)
+                cat_stack = require_shift[:, 0]
+                cat_mask = cat_stack.ge(-1)
+                b_rd_s = torch.cat((b_rd, cat_stack), -1)
+                f_mask = torch.cat((b_rd_mask, cat_mask), -1)
+                stack_mask = ~require_shift.ge(-1)
+                stack_mask[:, 0] = True
+                require_shift = require_shift.masked_scatter(
+                    stack_mask, b_rd_s[f_mask.cumsum(1).le(seq_len) & f_mask])
+                require_shift[:, 1, :-1] = require_shift[:, 1, 1:].clone()
+                require_shift[:, 1, -1] = -1
+                require_shift[:, 2] = -1
+                shift_action_mask = ~require_shift.ge(-1)
+                shift_action_mask[:, 3, 0] = True
+                require_shift = require_shift.masked_scatter(
+                    shift_action_mask, followed_action[Shift_mask])
+                back_shift_mask = Shift_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_shift_mask, require_shift)
+
+            # 到此remain_stat修改完毕,接下来把状态写回save_stat
+            state_back_mask = unfinish_mask.unsqueeze(1).expand(
+                -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+            save_stat = save_stat.masked_scatter(state_back_mask, remain_stat)
+            unfinish_mask = save_stat[:, 1, 0].gt(-1)
+            # [batch_size]
+
+        # losses中存储了每一步的loss
+        # loss = torch.sum(torch.stack(losses)) / (len(losses) + 1)
+        # print(f'\nsteps:{step}')
+        losses = torch.stack(losses) * torch.tensor(remain_ks,
+                                                    device=words.device)
+        loss = torch.sum(losses) / (len(losses) + 1)
+        return loss, remain_ks
+
+    
     def batch_decode(self, words, words_len, feats):
         batch_size, seq_len = words.shape
         # get the mask and lengths of given batch
@@ -1913,9 +3141,13 @@ class TransitionSemanticDependencyModel(nn.Module):
             ]
             for action_ in ["LR", "LP", "RS", "RP", "NS", "NR", "NP"]
         }
-        
-        edges = torch.zeros((batch_size, seq_len, seq_len), dtype=torch.long, device=words.device)
-        labels = -torch.ones((batch_size, seq_len, seq_len), dtype=torch.long, device=words.device)
+
+        edges = torch.zeros((batch_size, seq_len, seq_len),
+                            dtype=torch.long,
+                            device=words.device)
+        labels = -torch.ones((batch_size, seq_len, seq_len),
+                             dtype=torch.long,
+                             device=words.device)
 
         step = 0
         while (unfinish_mask.sum()):
@@ -2028,7 +3260,8 @@ class TransitionSemanticDependencyModel(nn.Module):
                                                   self.n_transitions)
             transitions = transitions.reshape(k, -1)
             # [k, 1]
-            transitions_embed = self.transition_embed(transitions).reshape(k, -1)
+            transitions_embed = self.transition_embed(transitions).reshape(
+                k, -1)
             # [k, n_transition_embed]
             final_repr = torch.cat((transitions_embed, states_hidden), -1)
             # [k, n_transition_embed+3*lstm_out_size]
@@ -2043,11 +3276,14 @@ class TransitionSemanticDependencyModel(nn.Module):
             # [k] 存放的是预测的action的下标
             this_step_action_embed = self.transition_embed(pred_action)
             # [k, n_transition_embed]
-            label_final_repr = torch.cat((final_repr, this_step_action_embed), -1)
+            label_final_repr = torch.cat((final_repr, this_step_action_embed),
+                                         -1)
             label_score = self.label_mlp(label_final_repr)
             pred_label = torch.argmax(label_score, dim=1)
-            require_left_mask = pred_action.eq(action_id['LR'][0]) + pred_action.eq(action_id['LP'][0])
-            require_right_mask = pred_action.eq(action_id['RP'][0]) + pred_action.eq(action_id['RS'][0])
+            require_left_mask = pred_action.eq(
+                action_id['LR'][0]) + pred_action.eq(action_id['LP'][0])
+            require_right_mask = pred_action.eq(
+                action_id['RP'][0]) + pred_action.eq(action_id['RS'][0])
 
             # 加边
             # pdb.set_trace()
@@ -2056,43 +3292,63 @@ class TransitionSemanticDependencyModel(nn.Module):
                 req_left_edge = remain_edge[require_left_mask]
                 req_left_label = remain_label[require_left_mask]
                 t = require_left.shape[0]
-                x_h = require_left[:, 0, 0].reshape(t, 1, 1).expand(-1, -1, seq_len)
-                y_h = require_left[:, 1, 0].reshape(t, 1, 1).expand(-1, seq_len, -1)
+                x_h = require_left[:, 0, 0].reshape(t, 1,
+                                                    1).expand(-1, -1, seq_len)
+                y_h = require_left[:, 1, 0].reshape(t, 1,
+                                                    1).expand(-1, seq_len, -1)
                 x_m = (~req_left_edge.ge(0)).scatter(1, x_h, 1)
                 y_m = (~req_left_edge.ge(0)).scatter(2, y_h, 1)
                 final_m = x_m & y_m
                 req_left_edge = req_left_edge.masked_fill(final_m, 1)
-                req_left_label = req_left_label.masked_scatter(final_m, pred_label[require_left_mask])
-                left_back_mask = require_left_mask.unsqueeze(1).expand(-1, seq_len).unsqueeze(2).expand(-1,-1,seq_len)
-                remain_edge = remain_edge.masked_scatter(left_back_mask, req_left_edge)
-                remain_label = remain_label.masked_scatter(left_back_mask, req_left_label)
+                req_left_label = req_left_label.masked_scatter(
+                    final_m, pred_label[require_left_mask])
+                left_back_mask = require_left_mask.unsqueeze(1).expand(
+                    -1, seq_len).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_edge = remain_edge.masked_scatter(
+                    left_back_mask, req_left_edge)
+                remain_label = remain_label.masked_scatter(
+                    left_back_mask, req_left_label)
 
                 require_right = remain_stat[require_right_mask]
                 req_right_edge = remain_edge[require_right_mask]
                 req_right_label = remain_label[require_right_mask]
                 t = require_right.shape[0]
-                x_h = require_right[:, 1, 0].reshape(t, 1, 1).expand(-1, -1, seq_len)
-                y_h = require_right[:, 0, 0].reshape(t, 1, 1).expand(-1, seq_len, -1)
+                x_h = require_right[:, 1,
+                                    0].reshape(t, 1,
+                                               1).expand(-1, -1, seq_len)
+                y_h = require_right[:, 0,
+                                    0].reshape(t, 1,
+                                               1).expand(-1, seq_len, -1)
                 x_m = (~req_right_edge.ge(0)).scatter(1, x_h, 1)
                 y_m = (~req_right_edge.ge(0)).scatter(2, y_h, 1)
                 final_m = x_m & y_m
                 req_right_edge = req_right_edge.masked_fill(final_m, 1)
-                req_right_label = req_right_label.masked_scatter(final_m, pred_label[require_right_mask])
-                right_back_mask = require_right_mask.unsqueeze(1).expand(-1, seq_len).unsqueeze(2).expand(-1,-1,seq_len)
-                remain_edge = remain_edge.masked_scatter(right_back_mask, req_right_edge)
-                remain_label = remain_label.masked_scatter(right_back_mask, req_right_label)
+                req_right_label = req_right_label.masked_scatter(
+                    final_m, pred_label[require_right_mask])
+                right_back_mask = require_right_mask.unsqueeze(1).expand(
+                    -1, seq_len).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_edge = remain_edge.masked_scatter(
+                    right_back_mask, req_right_edge)
+                remain_label = remain_label.masked_scatter(
+                    right_back_mask, req_right_label)
                 # 最后返回label的时候要把self.n_labels改成-1
 
                 # 把edge和label回写
-                edge_back_mask = unfinish_mask.unsqueeze(1).expand(-1, seq_len).unsqueeze(2).expand(-1, -1, seq_len)
+                edge_back_mask = unfinish_mask.unsqueeze(1).expand(
+                    -1, seq_len).unsqueeze(2).expand(-1, -1, seq_len)
                 edges = edges.masked_scatter(edge_back_mask, remain_edge)
                 labels = labels.masked_scatter(edge_back_mask, remain_label)
             # pdb.set_trace()
-            
+
             followed_action = pred_action
-            Reduce_mask = followed_action.eq(action_id['LR'][0]) + followed_action.eq(action_id['NR'][0])
-            Pass_mask = followed_action.eq(action_id['LP'][0]) + followed_action.eq(action_id['NP'][0]) + followed_action.eq(action_id['RP'][0])
-            Shift_mask = followed_action.eq(action_id['RS'][0]) + followed_action.eq(action_id['NS'][0])
+            Reduce_mask = followed_action.eq(
+                action_id['LR'][0]) + followed_action.eq(action_id['NR'][0])
+            Pass_mask = followed_action.eq(
+                action_id['LP'][0]) + followed_action.eq(
+                    action_id['NP'][0]) + followed_action.eq(
+                        action_id['RP'][0])
+            Shift_mask = followed_action.eq(
+                action_id['RS'][0]) + followed_action.eq(action_id['NS'][0])
             # [k]
 
             with torch.no_grad():
@@ -2101,9 +3357,12 @@ class TransitionSemanticDependencyModel(nn.Module):
                 require_reduce[:, 0, -1] = -1
                 reduce_action_mask = ~require_reduce.ge(-1)
                 reduce_action_mask[:, 3, 0] = True
-                require_reduce = require_reduce.masked_scatter(reduce_action_mask, followed_action[Reduce_mask])
-                back_reduce_mask = Reduce_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
-                remain_stat = remain_stat.masked_scatter(back_reduce_mask, require_reduce)
+                require_reduce = require_reduce.masked_scatter(
+                    reduce_action_mask, followed_action[Reduce_mask])
+                back_reduce_mask = Reduce_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_reduce_mask, require_reduce)
 
                 require_pass = remain_stat[Pass_mask]
                 require_pass[:, 2, 1:] = require_pass[:, 2, :-1].clone()
@@ -2112,9 +3371,12 @@ class TransitionSemanticDependencyModel(nn.Module):
                 require_pass[:, 0, -1] = -1
                 pass_action_mask = ~require_pass.ge(-1)
                 pass_action_mask[:, 3, 0] = True
-                require_pass = require_pass.masked_scatter(pass_action_mask, followed_action[Pass_mask])
-                back_pass_mask = Pass_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
-                remain_stat = remain_stat.masked_scatter(back_pass_mask, require_pass)
+                require_pass = require_pass.masked_scatter(
+                    pass_action_mask, followed_action[Pass_mask])
+                back_pass_mask = Pass_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_pass_mask, require_pass)
 
                 require_shift = remain_stat[Shift_mask]
                 buffer_top = require_shift[:, 1, 0].unsqueeze(1)
@@ -2127,24 +3389,28 @@ class TransitionSemanticDependencyModel(nn.Module):
                 f_mask = torch.cat((b_rd_mask, cat_mask), -1)
                 stack_mask = ~require_shift.ge(-1)
                 stack_mask[:, 0] = True
-                require_shift = require_shift.masked_scatter(stack_mask, b_rd_s[f_mask.cumsum(1).le(seq_len)&f_mask])
+                require_shift = require_shift.masked_scatter(
+                    stack_mask, b_rd_s[f_mask.cumsum(1).le(seq_len) & f_mask])
                 require_shift[:, 1, :-1] = require_shift[:, 1, 1:].clone()
                 require_shift[:, 1, -1] = -1
                 require_shift[:, 2] = -1
                 shift_action_mask = ~require_shift.ge(-1)
                 shift_action_mask[:, 3, 0] = True
-                require_shift = require_shift.masked_scatter(shift_action_mask, followed_action[Shift_mask])
-                back_shift_mask = Shift_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
-                remain_stat = remain_stat.masked_scatter(back_shift_mask, require_shift)
+                require_shift = require_shift.masked_scatter(
+                    shift_action_mask, followed_action[Shift_mask])
+                back_shift_mask = Shift_mask.unsqueeze(1).expand(
+                    -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+                remain_stat = remain_stat.masked_scatter(
+                    back_shift_mask, require_shift)
             # 到此remain_stat修改完毕,接下来把状态写回save_stat
-            state_back_mask = unfinish_mask.unsqueeze(1).expand(-1, 4).unsqueeze(2).expand(-1, -1, seq_len)
+            state_back_mask = unfinish_mask.unsqueeze(1).expand(
+                -1, 4).unsqueeze(2).expand(-1, -1, seq_len)
             save_stat = save_stat.masked_scatter(state_back_mask, remain_stat)
             unfinish_mask = save_stat[:, 1, 0].gt(-1)
             # [batch_size]
 
         labels = labels.masked_fill(labels.eq(self.n_labels), -1)
         return edges, labels
-        
 
     def new_decode(self, words, words_len, feats):
         r"""
