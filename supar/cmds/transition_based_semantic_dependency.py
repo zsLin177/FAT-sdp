@@ -34,6 +34,15 @@ def main():
                            type=int,
                            help='the num of epoch which donot use dynamic')
 
+    subparser.add_argument('--mu',
+                           default=0,
+                           type=int,
+                           help='hyper-paramter of pro to change')
+
+    subparser.add_argument('--batch_train',
+                           action='store_true',
+                           help='whether to use dynamic batch train')
+
     subparser.add_argument('--dynamic',
                            action='store_true',
                            help='whether to use the dynamic oracle')
@@ -80,11 +89,10 @@ def main():
     #                        default='dual',
     #                        help='the decoder to use: mlp, att, lstm, beta, dual')
 
-    subparser.add_argument('--loss_type',
-                           default='Formal',
-                           help='the used loss type: CrossEntropyLoss, MLL(multilabelloss)')
-    
-
+    subparser.add_argument(
+        '--loss_type',
+        default='Formal',
+        help='the used loss type: CrossEntropyLoss, MLL(multilabelloss)')
 
     # evaluate
     subparser = subparsers.add_parser(
@@ -96,6 +104,17 @@ def main():
     subparser.add_argument('--data',
                            default='data/sdp/DM/test.conllu',
                            help='path to dataset')
+
+    subparser.add_argument('--batch_decode',
+                           action='store_true',
+                           help='whether to use batch_decode')
+
+    subparser.add_argument(
+        '--feat',
+        '-f',
+        default='tag,char,lemma',
+        help='additional features to use，separated by commas.')
+
     # predict
     subparser = subparsers.add_parser(
         'predict', help='Use a trained parser to make predictions.')

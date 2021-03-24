@@ -2,7 +2,7 @@
 
 import os
 from datetime import datetime, timedelta
-
+import pdb
 import supar
 import torch
 import torch.distributed as dist
@@ -95,20 +95,30 @@ class Parser(object):
 
         self.transform.train()
         logger.info("Loading the data")
+        # pdb.set_trace()
         dataset = Dataset(self.transform, data)
         dataset.build(args.batch_size, args.buckets)
         logger.info(f"\n{dataset}")
 
         logger.info("Evaluating the dataset")
         start = datetime.now()
-        metric = self._evaluate(dataset.loader, args.decode_mode)
+        if (args.batch_decode):
+            metric = self._batch_evaluate(dataset.loader, args.decode_mode)
+        else:
+            metric = self._evaluate(dataset.loader, args.decode_mode)
         elapsed = datetime.now() - start
         # logger.info(f"loss: {loss:.4f} - {metric}")
         logger.info(f"{metric}")
         logger.info(
             f"{elapsed}s elapsed, {len(dataset)/elapsed.total_seconds():.2f} Sents/s"
         )
-
+        total_tokens = 0
+        for s in dataset.sentences:
+            total_tokens += len(s)
+        
+        logger.info(
+            f"{elapsed}s elapsed, {total_tokens/elapsed.total_seconds():.2f} Tokens/s"
+        )
         return metric
 
     def predict(self,
