@@ -77,6 +77,7 @@ class TransitionSemanticDependencyParser(Parser):
         dev = Dataset(self.transform, args.dev)
         test = Dataset(self.transform, args.test)
         train.build(args.batch_size, args.buckets, True, dist.is_initialized())
+        # pdb.set_trace()
         dev.build(args.batch_size, args.buckets)
         test.build(args.batch_size, args.buckets)
         logger.info(
@@ -99,9 +100,10 @@ class TransitionSemanticDependencyParser(Parser):
             else:
                 if (args.batch_train):
                     logger.info(f"dynamic pro:{p}")
-                    ratio = self._dynamic_train(train.loader, args.decode_mode,
-                                                p)
-                    logger.info(f"epoch follow false ratio:{ratio}")
+                    # ratio = self._dynamic_train(train.loader, args.decode_mode,
+                    #                             p)
+                    self._dynamic_train(train.loader, args.decode_mode, p)
+                    # logger.info(f"epoch follow false ratio:{ratio}")
                     if (mu > 0):
                         p = 1.0 - (mu / (mu + math.exp(epoch / mu)))
                 else:
@@ -323,40 +325,71 @@ class TransitionSemanticDependencyParser(Parser):
                 )
 
     def _dynamic_train(self, loader, mode, p):
-        # 目前仅针对了dual loss
-        num_all = 0
-        num_false = 0
+        # num_all = 0
+        # num_false = 0
         self.model.train()
         bar = progress_bar(loader)
-        for words, *feats, edges, labels, transitions, translabel, states in bar:
-            self.optimizer.zero_grad()
+        if (mode not in ('dual', 'par-dual')):
+            for words, *feats, edges, labels, transitions, states in bar:
+                self.optimizer.zero_grad()
 
-            # transition_mask = transitions.ge(0)
-            # transition_len = transition_mask.sum(1)
-            mask = words.ne(self.WORD.pad_index)
-            words_len = torch.sum(mask, dim=-1)
+                # transition_mask = transitions.ge(0)
+                # transition_len = transition_mask.sum(1)
+                mask = words.ne(self.WORD.pad_index)
+                words_len = torch.sum(mask, dim=-1)
 
-            # loss = self.model.dynamic_loss4(words, words_len, feats, edges,
-            #                                 labels, p)
+                # loss = self.model.dynamic_loss4(words, words_len, feats, edges,
+                #                                 labels, p)
 
-            # 6,7是分析实验
-            loss, n_all, n_false = self.model.dynamic_loss4(
-                words, words_len, feats, edges, labels, p)
-            num_all += n_all
-            num_false += n_false
-            # all_pred_step += num_follow_pred_step
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
-            self.optimizer.step()
-            self.scheduler.step()
+                loss = self.model.dynamic_loss4_single_fix(words, words_len, feats,
+                                                       edges, labels, p)
+                # num_all += n_all
+                # num_false += n_false
+                # all_pred_step += num_follow_pred_step
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.model.parameters(),
+                                         self.args.clip)
+                self.optimizer.step()
+                self.scheduler.step()
 
-            # edge_preds, label_preds = self.model.decode(s_edge, s_label)
-            # metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
-            #        labels.masked_fill(~(edges.gt(0) & mask), -1))
-            bar.set_postfix_str(
-                f"lr: {self.scheduler.get_last_lr()[0]:.4e} - loss: {loss:.4f}"
-            )
-        return num_false / num_all
+                # edge_preds, label_preds = self.model.decode(s_edge, s_label)
+                # metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
+                #        labels.masked_fill(~(edges.gt(0) & mask), -1))
+                bar.set_postfix_str(
+                    f"lr: {self.scheduler.get_last_lr()[0]:.4e} - loss: {loss:.4f}"
+                )
+            # return num_false / num_all
+        else:
+            for words, *feats, edges, labels, transitions, translabel, states in bar:
+                self.optimizer.zero_grad()
+
+                # transition_mask = transitions.ge(0)
+                # transition_len = transition_mask.sum(1)
+                mask = words.ne(self.WORD.pad_index)
+                words_len = torch.sum(mask, dim=-1)
+
+                # loss = self.model.dynamic_loss4(words, words_len, feats, edges,
+                #                                 labels, p)
+
+                # 6,7是分析实验
+                loss = self.model.dynamic_loss4(words, words_len, feats, edges,
+                                                labels, p)
+                # num_all += n_all
+                # num_false += n_false
+                # all_pred_step += num_follow_pred_step
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.model.parameters(),
+                                         self.args.clip)
+                self.optimizer.step()
+                self.scheduler.step()
+
+                # edge_preds, label_preds = self.model.decode(s_edge, s_label)
+                # metric(label_preds.masked_fill(~(edge_preds.gt(0) & mask), -1),
+                #        labels.masked_fill(~(edges.gt(0) & mask), -1))
+                bar.set_postfix_str(
+                    f"lr: {self.scheduler.get_last_lr()[0]:.4e} - loss: {loss:.4f}"
+                )
+            # return num_false / num_all
 
     def _train(self, loader, mode):
         self.model.train()
@@ -657,6 +690,7 @@ class TransitionSemanticDependencyParser(Parser):
             'transition_vocab': Transition.vocab,
             'n_transition_embed': 600
         })
+        # pdb.set_trace()
         logger.info(f"{transform}")
 
         logger.info("Building the model")
