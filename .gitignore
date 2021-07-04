@@ -44,6 +44,7 @@ __pycache__
 # test
 py_test.py
 test.py
+analy.py
 
 # conllu
 *.conllu
