@@ -1,6 +1,6 @@
 # Fast and Accurate Transition-based SDP
 
-It is the source code of CCKS 2021 “基于转移的快速精准的语义依存图分析”.
+It is the source code of CCKS 2021 “基于转移的快速精准的语义依存图分析”, which is based on [supar](https://github.com/yzhangcs/parser).
 
 ## training
 
