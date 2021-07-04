@@ -28,6 +28,11 @@ def main():
                            default=0.6,
                            type=float,
                            help='the probablity')
+    
+    subparser.add_argument('--itp',
+                           default=0.5,
+                           type=float,
+                           help='the interploation')
 
     subparser.add_argument('--k',
                            default=3,

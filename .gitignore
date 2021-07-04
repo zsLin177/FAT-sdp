@@ -31,3 +31,19 @@ __pycache__
 
 # vscode
 .vscode
+
+# nohup
+*.out
+
+# json
+* .json
+
+# shell
+* .sh
+
+# test
+py_test.py
+test.py
+
+# conllu
+*.conllu

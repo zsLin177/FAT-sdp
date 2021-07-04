@@ -545,21 +545,28 @@ class TransitionSemanticDependencyParser(Parser):
         charts, probs = [], []
         for words, *feats in progress_bar(loader):
             mask = words.ne(self.WORD.pad_index)
+            words_len = torch.sum(mask, dim=-1)
             mask = mask.unsqueeze(1) & mask.unsqueeze(2)
             mask[:, 0] = 0
             lens = mask[:, 1].sum(-1).tolist()
-            s_edge, s_label = self.model(words, feats)
-            edge_preds, label_preds = self.model.decode(s_edge, s_label)
+            # s_edge, s_label = self.model(words, feats)
+            # edge_preds, label_preds = self.model.decode(s_edge, s_label)
+            if(self.args.decode_mode == 'mlp'):
+                edge_preds, label_preds = self.model.batch_decode_3(
+                    words, words_len, feats)
+            elif(self.args.decode_mode == 'dual'):
+                edge_preds, label_preds = self.model.batch_decode(
+                    words, words_len, feats)
             chart_preds = label_preds.masked_fill(~(edge_preds.gt(0) & mask),
                                                   -1)
             charts.extend(chart[1:i, :i].tolist()
                           for i, chart in zip(lens, chart_preds.unbind()))
-            if self.args.prob:
-                probs.extend([
-                    prob[1:i, :i].cpu()
-                    for i, prob in zip(lens,
-                                       s_edge.softmax(-1).unbind())
-                ])
+            # if self.args.prob:
+            #     probs.extend([
+            #         prob[1:i, :i].cpu()
+            #         for i, prob in zip(lens,
+            #                            s_edge.softmax(-1).unbind())
+            #     ])
         charts = [
             CoNLL.build_relations(
                 [[self.LABEL.vocab[i] if i >= 0 else None for i in row]

@@ -111,6 +111,7 @@ class TransitionSemanticDependencyModel(nn.Module):
                  pad_index=0,
                  unk_index=1,
                  window=1,
+                 itp=0.5,
                  **kwargs):
         super().__init__()
 
@@ -122,6 +123,7 @@ class TransitionSemanticDependencyModel(nn.Module):
         self.transition_vocab = transition_vocab
         self.n_labels = n_labels  # 不算空label的数量
         self.loss_type = loss_type
+        self.itp = itp
         # the embedding layer
         self.word_embed = nn.Embedding(num_embeddings=n_words,
                                        embedding_dim=n_embed)
@@ -794,7 +796,7 @@ class TransitionSemanticDependencyModel(nn.Module):
         # pdb.set_trace()
         action_loss = self.criterion(action_score[mask], gold_action[mask])
         label_loss = self.criterion(label_score[mask], gold_label[mask])
-        return action_loss + label_loss
+        return (1 - self.itp) * action_loss + self.itp * label_loss
 
     def decode(self, words, words_len, feats):
         r"""
@@ -828,7 +830,7 @@ class TransitionSemanticDependencyModel(nn.Module):
         # concatenate the word and feat representations
         embed = torch.cat((word_embed, feat_embed), -1)
 
-        x = pack_padded_sequence(embed, mask.sum(1), True, False)
+        x = pack_padded_sequence(embed, mask.sum(1).tolist(), True, False)
         x, _ = self.lstm(x)
         x, _ = pad_packed_sequence(x, True, total_length=seq_len)
         # x:[batch_size, seq_len, hidden_size*2]
@@ -2576,7 +2578,7 @@ class TransitionSemanticDependencyModel(nn.Module):
         # concatenate the word and feat representations
         embed = torch.cat((word_embed, feat_embed), -1)
 
-        x = pack_padded_sequence(embed, mask.sum(1), True, False)
+        x = pack_padded_sequence(embed, mask.sum(1).tolist(), True, False)
         x, _ = self.lstm(x)
         x, _ = pad_packed_sequence(x, True, total_length=seq_len)
         x = self.lstm_dropout(x)
@@ -3329,7 +3331,7 @@ class TransitionSemanticDependencyModel(nn.Module):
         # concatenate the word and feat representations
         embed = torch.cat((word_embed, feat_embed), -1)
 
-        x = pack_padded_sequence(embed, mask.sum(1), True, False)
+        x = pack_padded_sequence(embed, mask.sum(1).tolist(), True, False)
         x, _ = self.lstm(x)
         x, _ = pad_packed_sequence(x, True, total_length=seq_len)
         x = self.lstm_dropout(x)

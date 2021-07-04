@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence
-
+import pdb
 
 class CharLSTM(nn.Module):
     r"""
@@ -59,7 +59,7 @@ class CharLSTM(nn.Module):
 
         # [n, fix_len, n_embed]
         x = self.embed(x[char_mask])
-        x = pack_padded_sequence(x, lens[char_mask], True, False)
+        x = pack_padded_sequence(x, lens[char_mask].tolist(), True, False)
         x, (h, _) = self.lstm(x)
         # [n, fix_len, n_out]
         h = torch.cat(torch.unbind(h), -1)
